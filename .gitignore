@@ -1,0 +1,35 @@
+# Build output directory
+dist/
+
+# Executables, objects, and libraries
+*.exe
+*.dll
+*.lib
+*.pdb
+*.ilk
+*.exp
+*.obj
+*.o
+*.a
+*.so
+*.dylib
+
+# Visual Studio / IDE / Editor files
+.vs/
+.vscode/
+.idea/
+*.user
+*.suo
+*.sln
+*.vcxproj*
+
+# Windows system / temporary files
+Thumbs.db
+Desktop.ini
+*.tmp
+*.log
+*.bak
+*.swp
+*.swo
+*~
+.DS_Store

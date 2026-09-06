@@ -1,0 +1,13 @@
+# Pin2Top Design (pin-to-top.c)
+
+- **CLI** (`--border-width N`, `--max-windows N`, `--window-selection true|false`): optional; missing/unknown flags, missing values, and non-integers are ignored and fall back to defaults; out-of-range values are clamped. Ranges: border 1–20, max-windows 1–10. `--window-selection` defaults to `true` (opens interactive window picker on double-click/launch); set `--window-selection false` (or `--no-picker` / `--active` / `--foreground`) to immediately pin the foreground window without a picker.
+- **Config** struct: `{ int borderWidth; int maxWindows; bool windowSelection; }`. Tunable defaults are `#define`s at the top of `pin-to-top.c`: `DEFAULT_BORDER_WIDTH` (2), `DEFAULT_MAX_WINDOWS` (1), `DEFAULT_BORDER_COLOR` (RGB(0,120,215)), plus range bounds `BORDER_MIN/MAX` (1/20) and `MAXWINDOWS_MIN/MAX` (1/10).
+- **Border color**: default is `DEFAULT_BORDER_COLOR`; at first-launch `g_borderColor = GetWallpaperDominantColorThief()` (`src/common/color-thief-algorithm.h`, DWM accent API with MMCQ fallback, GDI-only) queries the system accent color or MMCQ quantization. Falls back to default if sampling fails.
+- **Border accuracy**: overlay windows are positioned from `GetFrameRect`, which prefers `DwmGetWindowAttribute(DWMWA_EXTENDED_FRAME_BOUNDS)` (`dwmapi` loaded via `LoadLibrary`/`GetProcAddress`) and falls back to `GetWindowRect` when DWM is unavailable.
+- **State**: array `g_pinned[MAX_PIN_SLOTS]` of `{HWND target; HWND overlay; RECT lastRect;}`.
+- **First launch**: `TinyDPI_EnablePerMonitorAwareness()` → if `windowSelection` is true, shows interactive window selection overlay; else pins foreground window → creates mutex (own) → creates event → samples wallpaper color → tracks pinned windows. **Second launch**: signals toggle → exits.
+- **Toggle logic**: on event, take `GetForegroundWindow()`. If it is a tracked window → unpin + destroy its overlay; if no tracked windows remain → exit process. If not tracked → shows window selection overlay (or pins foreground if window-selection is false) while `count < maxWindows`.
+- **Pin/unpin**: `SetWindowPos(target, HWND_TOPMOST / HWND_NOTOPMOST, ..., SWP_NOMOVE|SWP_NOSIZE)`.
+- **Tracking loop** (16 ms): `!IsWindow(target)` → drop entry silently; `IsIconic` → hide overlay; else compare `GetFrameRect` to `lastRect` and move overlay only on change.
+- **Pinned-window lifecycle edge case**: window destroyed while pinned → silently removed (nothing to unpin). Overlay destroyed in every removal path.
+- **Exit path**: loop breaks → unpin all remaining + destroy overlays → close handles → `return 0`.
