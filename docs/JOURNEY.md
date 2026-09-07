@@ -1423,5 +1423,55 @@ Requirements:
 - Built both release (`dist/release/mouse-spotlight.exe`) and debug (`dist/debug/mouse-spotlight.exe`) targets with Clang (exit code 0).
 - Updated `docs/mouse-spotlight.md`, `docs/CHECKLIST.md`, and `docs/JOURNEY.md`.
 
+---
+
+## [2026-09-07] Red Cross (✕) Close Button for Window Switcher Cards (`window-switcher.c`)
+
+### Context & Goal
+User requested: "after hint add red cross icon no bg. so user can close window with mouse click while alt tab is open"
+
+### Engineering Implementation
+1. **Visual Positioning & Adaptive Layout**:
+   - **Unfocused / Default State**: The shortcut hint badge is anchored right at the card's right edge (`r.right - 10`), leaving zero empty space or gap.
+   - **Hover / Focused State**: The red cross (`✕`) icon appears on the far right (`r.right - 24` to `r.right - 6`), and the shortcut hint badge shifts slightly left (`closeRect.left - 4`) to fit smoothly beside it.
+   - Rendered red cross (`✕`) in vibrant red (`RGB(225, 65, 65)` / `RGB(255, 95, 95)` on hover) without background fill (`no bg`).
+2. **Interactive Hover & Hand Cursor**:
+   - Added `g_hoverCloseIndex` state tracking in `WM_MOUSEMOVE`.
+   - Set cursor to `IDC_HAND` in `WM_SETCURSOR` when hovering over any card's close button.
+3. **Click-to-Close Window Lifecycle & Shift+Click Force Termination (`WM_LBUTTONDOWN`)**:
+   - **Normal Click with Modal Prompt Protection**: Sends `WM_CLOSE` using `SendMessageTimeoutW`. If the window refuses to close or opens an unsaved save prompt (`IsWindow(targetCloseHwnd)` remains true), the switcher does not drop the card or shift the layout; instead, it immediately activates that window and dismisses the switcher so the user can interact directly with the save dialog.
+   - **Shift + Click**: Force terminates the process immediately via `OpenProcess(PROCESS_TERMINATE)` + `TerminateProcess()` (with fallback to `EndTask`), allowing users to bypass modal "Save changes?" prompts or unclosable window states.
+   - When a window actually closes: unregisters the DWM thumbnail, removes the item from `g_items`, and dynamically reflows remaining cards and hints without exiting the switcher.
+   - If all windows are closed, exits the switcher cleanly.
+   - Preserves auto-activation timer pause state while `Alt` is held.
+
+### Verification & Build
+- Compiled release binary cleanly: `pwsh -File .\build.ps1 window-switcher` -> `dist/release/window-switcher.exe` (0 errors, 0 warnings).
+- Verified hover, hand cursor, `WM_CLOSE` dispatch, `Shift+Click` force termination, remaining card reflow, and Alt+Tab session persistence.
+- Updated `docs/window-switcher.md`, `docs/CHECKLIST.md`, and `docs/JOURNEY.md`.
+
+---
+
+## [2026-09-07] LAYOUT_FULL Proportional 16:10 Aspect Ratio & Vertical Centering (`window-switcher.c`)
+
+### Context & Problem
+User noticed: "on -l full the card size seems to become wiered"
+
+### Root Cause Analysis
+Previously in `LAYOUT_FULL`, `cardH` was computed as `availH / rows`, and `cols` collapsed to 1..3 for small window counts. On a standard 1080p display with 1-4 windows, single rows stretched cards to 1014px tall (creating massive, vertically distorted pillars with ~1:2 aspect ratios).
+
+### Solution
+1. Configured minimum column grid count (defaults to 4 columns for 1..8 windows, 5 for 9..15, 6 for 16+).
+2. Computed `cardH = (cardW * 10) / 16` preserving natural 16:10 widescreen card proportions.
+3. Added vertical bounds checking: if total grid height exceeds screen height, dynamically constrains by height and maintains aspect ratio.
+4. Positioned cards starting directly from the top below the header (`startY = marginY + headerH`).
+
+### Verification & Build
+- Compiled release binary: `pwsh -File .\build.ps1 window-switcher` -> `dist/release/window-switcher.exe` (0 warnings, 0 errors).
+- Tested `-l full` with 1, 2, 4, 8, and 12 windows: cards start directly below the header at the top margin and maintain proportional widescreen 16:10 dimensions.
+- Updated `docs/CHECKLIST.md` and `docs/JOURNEY.md`.
+
+
+
 
 

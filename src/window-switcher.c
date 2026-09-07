@@ -82,6 +82,7 @@ typedef struct {
     HTHUMBNAIL  hThumbnail;
     RECT        cardRect;
     RECT        previewRect;
+    RECT        closeRect;
     int         mruOrder;
     int         appGroupIndex;
     int         windowIndexInApp;
@@ -102,6 +103,7 @@ static int          g_appGroupCount = 0;
 
 static int          g_selectedIndex = 0;
 static int          g_hoverIndex = -1;
+static int          g_hoverCloseIndex = -1;
 static wchar_t      g_typedBuf[32] = {0};
 static int          g_typedLen = 0;
 static int          g_layoutCols = 4;
@@ -731,13 +733,14 @@ static void ComputeLayout(HWND hwnd, int *outW, int *outH) {
     for (int i = 0; i < g_itemCount; i++) {
         SetRectEmpty(&g_items[i].cardRect);
         SetRectEmpty(&g_items[i].previewRect);
+        SetRectEmpty(&g_items[i].closeRect);
     }
 
     int countToLayout = visibleCount > 0 ? visibleCount : 1;
 
     if (g_cfg.layout == LAYOUT_FULL) {
-        int marginX = 20;
-        int marginY = 16;
+        int marginX = 24;
+        int marginY = 20;
         int headerH = UI_HEADER_HEIGHT;
         int gap = UI_CARD_GAP;
 
@@ -747,7 +750,7 @@ static void ComputeLayout(HWND hwnd, int *outW, int *outH) {
         g_containerRect.bottom = monH - marginY;
 
         int cols = 4;
-        if (countToLayout <= 3) cols = countToLayout > 0 ? countToLayout : 1;
+        if (countToLayout <= 4) cols = 4;
         else if (countToLayout <= 8) cols = 4;
         else if (countToLayout <= 15) cols = 5;
         else cols = 6;
@@ -760,10 +763,25 @@ static void ComputeLayout(HWND hwnd, int *outW, int *outH) {
         int availW = monW - (marginX * 2) - ((cols - 1) * gap);
         int availH = monH - (marginY * 2) - headerH - ((rows - 1) * gap);
 
+        /* Calculate card dimensions preserving standard 16:10 aspect ratio */
         int cardW = availW / cols;
-        int cardH = availH / rows;
-        if (cardW < 100) cardW = 100;
+        int cardH = (cardW * 10) / 16;
+
+        /* If total height of all rows exceeds available height, constrain by height */
+        int totalGridH = rows * cardH + (rows - 1) * gap;
+        if (totalGridH > availH && rows > 0) {
+            cardH = (availH - (rows - 1) * gap) / rows;
+            cardW = (cardH * 16) / 10;
+            if (cardW > availW / cols) {
+                cardW = availW / cols;
+            }
+        }
+
+        if (cardW < 120) cardW = 120;
         if (cardH < 80) cardH = 80;
+
+        /* In FULL layout, start cards directly below the top header */
+        int startY = marginY + headerH;
 
         for (int v = 0; v < visibleCount; v++) {
             int i = visibleIndices[v];
@@ -771,12 +789,17 @@ static void ComputeLayout(HWND hwnd, int *outW, int *outH) {
             int c = v % cols;
 
             int cx = marginX + c * (cardW + gap);
-            int cy = marginY + headerH + r * (cardH + gap);
+            int cy = startY + r * (cardH + gap);
 
             g_items[i].cardRect.left = cx;
             g_items[i].cardRect.top = cy;
             g_items[i].cardRect.right = cx + cardW;
             g_items[i].cardRect.bottom = cy + cardH;
+
+            g_items[i].closeRect.left = cx + cardW - 28;
+            g_items[i].closeRect.top = cy + 5;
+            g_items[i].closeRect.right = cx + cardW - 8;
+            g_items[i].closeRect.bottom = cy + 27;
 
             int padX = 8;
             int padTop = 34;
@@ -919,6 +942,8 @@ static void PaintOverlay(HWND hwnd, HDC hdc) {
 
         bool isSelected = (v == g_selectedIndex);
         bool isHovered = (v == g_hoverIndex);
+        bool isCloseHovered = (v == g_hoverCloseIndex);
+        bool showClose = (isSelected || isHovered || isCloseHovered);
 
         COLORREF cardBg = isSelected ? RGB(38, 44, 56) : (isHovered ? RGB(32, 36, 45) : RGB(18, 20, 26));
         COLORREF cardBorder = isSelected ? RGB(0, 150, 255) : (isHovered ? RGB(80, 120, 170) : RGB(45, 48, 58));
@@ -931,17 +956,42 @@ static void PaintOverlay(HWND hwnd, HDC hdc) {
         DeleteObject(cBrush);
         DeleteObject(cPen);
 
+        /* Calculate hint badge size */
         SelectObject(memDC, g_hFontHint);
         SIZE textSize;
         GetTextExtentPoint32W(memDC, item->hint, (int)wcslen(item->hint), &textSize);
-
         int badgeW = textSize.cx + 14;
         if (badgeW < 26) badgeW = 26;
 
-        RECT badgeRect = { r.right - 10 - badgeW, r.top + 6, r.right - 10, r.top + 28 };
+        RECT badgeRect;
+        if (showClose) {
+            /* Close button visible: place cross at far right, hint badge to its left */
+            item->closeRect.left = r.right - 24;
+            item->closeRect.top = r.top + 5;
+            item->closeRect.right = r.right - 6;
+            item->closeRect.bottom = r.top + 27;
 
+            COLORREF closeColor = isCloseHovered ? RGB(255, 95, 95) : RGB(225, 65, 65);
+            SelectObject(memDC, g_hFontHint);
+            SetTextColor(memDC, closeColor);
+            DrawTextW(memDC, L"✕", -1, &item->closeRect, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
+
+            int badgeRight = item->closeRect.left - 4;
+            badgeRect.left = badgeRight - badgeW;
+            badgeRect.top = r.top + 6;
+            badgeRect.right = badgeRight;
+            badgeRect.bottom = r.top + 28;
+        } else {
+            /* Close button hidden: hint badge sits flush at right edge with NO empty space */
+            SetRectEmpty(&item->closeRect);
+            badgeRect.left = r.right - 10 - badgeW;
+            badgeRect.top = r.top + 6;
+            badgeRect.right = r.right - 10;
+            badgeRect.bottom = r.top + 28;
+        }
+
+        /* Render Shortcut Hint Badge */
         COLORREF badgeBg = isSelected ? RGB(0, 120, 240) : (isHovered ? RGB(35, 85, 155) : RGB(48, 64, 90));
-
         HBRUSH badgeBrush = CreateSolidBrush(badgeBg);
         SelectObject(memDC, badgeBrush);
         SelectObject(memDC, GetStockObject(NULL_PEN));
@@ -949,8 +999,10 @@ static void PaintOverlay(HWND hwnd, HDC hdc) {
         DeleteObject(badgeBrush);
 
         SetTextColor(memDC, RGB(255, 255, 255));
+        SelectObject(memDC, g_hFontHint);
         DrawTextW(memDC, item->hint, -1, &badgeRect, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
 
+        /* App Name and Window Title */
         SelectObject(memDC, g_hFontGroup);
         SetTextColor(memDC, isSelected ? RGB(230, 240, 255) : RGB(170, 180, 195));
 
@@ -1259,7 +1311,9 @@ static LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
         int x = GET_X_LPARAM(lParam);
         int y = GET_Y_LPARAM(lParam);
         int oldHover = g_hoverIndex;
+        int oldHoverClose = g_hoverCloseIndex;
         g_hoverIndex = -1;
+        g_hoverCloseIndex = -1;
 
         int visibleIndices[MAX_WINDOWS];
         int visibleCount = 0;
@@ -1267,15 +1321,27 @@ static LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
 
         for (int v = 0; v < visibleCount; v++) {
             int i = visibleIndices[v];
-            if (PtInRect(&g_items[i].cardRect, (POINT){x, y})) {
+            if (PtInRect(&g_items[i].closeRect, (POINT){x, y})) {
+                g_hoverCloseIndex = v;
+                g_hoverIndex = v;
+                break;
+            } else if (PtInRect(&g_items[i].cardRect, (POINT){x, y})) {
                 g_hoverIndex = v;
                 break;
             }
         }
-        if (g_hoverIndex != oldHover) {
+        if (g_hoverIndex != oldHover || g_hoverCloseIndex != oldHoverClose) {
             InvalidateRect(hwnd, NULL, FALSE);
         }
         return 0;
+    }
+
+    case WM_SETCURSOR: {
+        if (LOWORD(lParam) == HTCLIENT && g_hoverCloseIndex >= 0) {
+            SetCursor(LoadCursor(NULL, IDC_HAND));
+            return TRUE;
+        }
+        break;
     }
 
     case WM_TIMER: {
@@ -1305,6 +1371,85 @@ static LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
         int visibleCount = 0;
         GetFilteredIndices(visibleIndices, &visibleCount);
 
+        /* 1. Check if user clicked the Red Cross close icon */
+        for (int v = 0; v < visibleCount; v++) {
+            int i = visibleIndices[v];
+            if (PtInRect(&g_items[i].closeRect, (POINT){x, y})) {
+                HWND targetCloseHwnd = g_items[i].hwnd;
+                DWORD targetPid = g_items[i].processId;
+                bool isShiftHeld = (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
+
+                if (isShiftHeld) {
+                    /* Shift + Click: Force terminate process immediately */
+                    HANDLE hProc = OpenProcess(PROCESS_TERMINATE, FALSE, targetPid);
+                    if (hProc) {
+                        TerminateProcess(hProc, 0);
+                        CloseHandle(hProc);
+                    } else {
+                        EndTask(targetCloseHwnd, FALSE, TRUE);
+                    }
+                } else {
+                    /* Normal Click: Graceful close with responsiveness check */
+                    DWORD_PTR dwResult = 0;
+                    SendMessageTimeoutW(targetCloseHwnd, WM_CLOSE, 0, 0, SMTO_ABORTIFHUNG | SMTO_NORMAL, 120, &dwResult);
+
+                    /* If the window refused to close or opened an unsaved save prompt */
+                    if (IsWindow(targetCloseHwnd)) {
+                        /* Switch to that window so user can see and answer the modal save prompt */
+                        ActivateWindow(targetCloseHwnd);
+                        CancelPendingAutoActivate(hwnd);
+                        PostQuitMessage(0);
+                        return 0;
+                    }
+                }
+
+                if (g_items[i].hThumbnail) {
+                    DwmUnregisterThumbnail(g_items[i].hThumbnail);
+                    g_items[i].hThumbnail = NULL;
+                }
+
+                for (int k = i; k < g_itemCount - 1; k++) {
+                    g_items[k] = g_items[k + 1];
+                }
+                g_itemCount--;
+
+                if (g_itemCount == 0) {
+                    CancelPendingAutoActivate(hwnd);
+                    PostQuitMessage(0);
+                    return 0;
+                }
+
+                ComputeAppHints();
+                int dummyW, dummyH;
+                ComputeLayout(hwnd, &dummyW, &dummyH);
+
+                int newVisibleIndices[MAX_WINDOWS];
+                int newVisibleCount = 0;
+                GetFilteredIndices(newVisibleIndices, &newVisibleCount);
+
+                if (g_selectedIndex >= newVisibleCount) {
+                    g_selectedIndex = newVisibleCount > 0 ? (newVisibleCount - 1) : 0;
+                }
+
+                if (IsAltKeyDown()) {
+                    if (newVisibleCount > 0 && g_selectedIndex >= 0 && g_selectedIndex < newVisibleCount) {
+                        g_pendingHwndToActivate = g_items[newVisibleIndices[g_selectedIndex]].hwnd;
+                    }
+                    KillTimer(hwnd, TIMER_AUTO_ACTIVATE);
+                } else {
+                    if (newVisibleCount > 0 && g_selectedIndex >= 0 && g_selectedIndex < newVisibleCount) {
+                        TriggerAutoActivate(hwnd, g_items[newVisibleIndices[g_selectedIndex]].hwnd);
+                    }
+                }
+
+                g_hoverCloseIndex = -1;
+                g_hoverIndex = -1;
+                InvalidateRect(hwnd, NULL, FALSE);
+                return 0;
+            }
+        }
+
+        /* 2. Check if user clicked the card container -> activate window */
         for (int v = 0; v < visibleCount; v++) {
             int i = visibleIndices[v];
             if (PtInRect(&g_items[i].cardRect, (POINT){x, y})) {
@@ -1315,7 +1460,8 @@ static LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
                 return 0;
             }
         }
-        /* Click outside overlay closes switcher */
+
+        /* 3. Click outside overlay closes switcher */
         CancelPendingAutoActivate(hwnd);
         PostQuitMessage(0);
         return 0;
