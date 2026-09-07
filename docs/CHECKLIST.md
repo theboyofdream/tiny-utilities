@@ -290,6 +290,17 @@ Legend: `[x]` done & verified, `[ ]` known gap, `[-]` not applicable.
   - Robust single-window rendering architecture (`g_hwndOverlay`), reusing `font.h` header functions (`TinyFont_GetBestUIFace`), positioning the borderless standard-size shortcut hint badge (`g_hFontHint` 15pt bold) on the RIGHT side of card headers, with `App Name — Window Title` on the LEFT side, guaranteeing zero thumbnail obscuration.
   - Verified `pwsh -File .\build.ps1 window-switcher` compiles cleanly in release and debug modes with zero errors. Smoke tested double-launch IPC toggle contract.
 
+## 25. MOUSE SPOTLIGHT TOOL (`src/mouse-spotlight.c` -> `mouse-spotlight.exe` — updated 2026-09-07)
+- [x] Native Win32 presentation overlay tool: dims screen except for a customizable spotlight hole centered on mouse cursor.
+- [x] Real-time tracking: 60 FPS loop (16 ms step) updates spotlight position and size smoothly as cursor moves across displays.
+- [x] Customization CLI flags (`tiny_cli.h`): `--size N` / `-s N` (base radius at 96 DPI, default 150, range 20..1000) and `--dim N` / `-d N` (background dimming percentage 0..100% or raw alpha 0..255, default 65% / 165 alpha).
+- [x] Interactive hotkeys & dismissal: `Ctrl +` / `Numpad +` (enlarge spotlight), `Ctrl -` / `Numpad -` (shrink spotlight), `Ctrl 0` / `Numpad 0` (reset size to startup value). Pressing `Esc`, any non-hotkey key, or mouse click exits cleanly (following `find-my-mouse` UX conventions after 250ms activation grace period).
+- [x] Multi-monitor DPI awareness (`tiny_dpi.h`): `TinyDPI_EnablePerMonitorAwareness()` + `TinyDPI_GetDpiForPoint(cur)` dynamically scales spotlight radius (`MulDiv(baseSize, dpi, 96)`) so physical size remains identical on high-DPI and standard displays.
+- [x] Zero-Lag Per-Pixel Alpha DIB Renderer (`UpdateLayeredWindow`): full virtual desktop layered window (`WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW`) with 32-bpp top-down DIB section, partial bounding-box clears, and smooth 6px anti-aliased soft edge feathering. Eliminates `SetWindowRgn` DWM region recalculation lag for silky smooth 60+ FPS tracking.
+- [x] Click-through overlay: `WS_EX_TRANSPARENT` allows mouse clicks, drags, typing, and app interaction to pass through seamlessly during presentations.
+- [x] Single-Instance IPC Toggle (`tiny_ipc.h`): `Global\TinyMouseSpotlightMutex` and `Global\TinyMouseSpotlightEvent`. Second launch signals toggle event and exits 0; running instance receives signal and exits cleanly.
+- [x] Build rule verified: `pwsh -File .\build.ps1 mouse-spotlight` compiles cleanly in both release (`dist/release/mouse-spotlight.exe`) and debug (`dist/debug/mouse-spotlight.exe`) modes with exit code 0.
+
 ## Open items / notes
 - CPU idle % not re-measured; loop is event-wait based (sleeps 16 ms) so expected < 0.2%.
 - Manual visual verification of overlay rendering (border/disc appearance, click-through)

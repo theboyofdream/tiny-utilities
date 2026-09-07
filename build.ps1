@@ -64,6 +64,12 @@ $TARGET_CONFIGS = [ordered]@{
         ExtraMinGW  = @('-municode')
         Aliases     = @('switcher', 'win-switch', 'windowswitcher')
     }
+    'mouse-spotlight' = @{
+        Subsystem   = 'windows'
+        Libs        = @('user32', 'gdi32')
+        ExtraMinGW  = @('-municode')
+        Aliases     = @('spotlight', 'mousespotlight')
+    }
 }
 
 function Resolve-TargetName([string]$Name) {
