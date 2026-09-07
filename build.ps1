@@ -58,6 +58,12 @@ $TARGET_CONFIGS = [ordered]@{
         ExtraMinGW  = @('-municode')
         Aliases     = @()
     }
+    'window-switcher' = @{
+        Subsystem   = 'windows'
+        Libs        = @('user32', 'gdi32', 'dwmapi', 'shell32', 'ole32', 'version')
+        ExtraMinGW  = @('-municode')
+        Aliases     = @('switcher', 'win-switch', 'windowswitcher')
+    }
 }
 
 function Resolve-TargetName([string]$Name) {

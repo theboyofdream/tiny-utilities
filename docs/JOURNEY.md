@@ -771,3 +771,616 @@ When `cmdx.ps1` was copied or executed from a standalone directory like `C:\scri
 - Ran `git status` to verify `.gitignore` excludes `dist/` and untracked binaries.
 - Staged `.gitignore`, `AGENTS.md`, `docs/JOURNEY.md`, `docs/CHECKLIST.md` and created initial Git commit as requested by the user.
 
+---
+
+## [2026-09-06] Implementation of Tiny Window Switcher (`window-switcher.c`)
+
+### Context & Goal
+Added a new utility: **Tiny Window Switcher** (`window-switcher.exe`).
+Requirements:
+1. Native Windows utility written in C using Win32 and DWM APIs.
+2. Enumerate open top-level application windows and group/sort based on CLI options (`--group=app|window|none`, default `none`; `--sort=mru|name|recent`, default `name`).
+3. Compute shortest unique prefix of each app name as a hint badge (`Chrome -> C`, `Code -> CO`, `Chromium -> CH`).
+4. Display minimal overlay with app hints and hardware-accelerated live DWM window previews (`DwmRegisterThumbnail`, `DwmUpdateThumbnailProperties`).
+5. Support instant activation via hint key typing, cycling through multi-window app instances, and Alt+Tab muscle memory.
+6. Strictly controlled via CLI args with zero GUI configuration or disk persistence.
+
+### Architecture & Implementation Highlights
+1. **Source File & Spec**:
+   - Source: `src/window-switcher.c` -> `window-switcher.exe`
+   - Spec: `docs/window-switcher.md`
+2. **CLI Option Parsing (`tiny_cli.h`)**:
+   - Enhanced `tiny_cli.h` to support `--option=value` as well as `--option value` syntax.
+   - Parsed `--group` (`app`, `window`, `none`) and `--sort` (`name`, `mru`, `recent`).
+3. **Window Enumeration & Filtering**:
+   - Enumerate visible, non-cloaked, non-tool windows owned by applications.
+   - Retained process ID and extracted base executable name (`GetProcessAppName`) for clean app naming.
+4. **Shortest Unique Prefix Hint Algorithm**:
+   - Implemented a greedy disambiguation prefix algorithm across unique application process names.
+   - Generates shortest unique uppercase prefixes (`C`, `CO`, `CH`).
+   - Appends window sub-indices (`C1`, `C2`) for multi-window applications when grouped by window/none.
+5. **Live DWM Previews & GDI Double-Buffering**:
+   - Created dark-mode overlay window centered on the active monitor (`MonitorFromPoint`).
+   - Used `DwmRegisterThumbnail` and `DwmUpdateThumbnailProperties` for crisp hardware-accelerated window previews.
+   - Rendered high-contrast hint badges and window titles on double-buffered GDI surface.
+6. **Input Handling & Muscle Memory**:
+   - Typing hint letters immediately matches and activates or cycles target windows.
+   - Supports `Tab`, `Shift+Tab`, `Arrows`, `Enter`/`Space`, `Backspace`, `Escape`, mouse hover/click, and Alt key release.
+7. **Single Instance Toggle IPC**:
+   - Integrated `TinyIPC_AcquireOrToggle` with `Global\TinyWindowSwitcherMutex` and `Global\TinyWindowSwitcherEvent`.
+
+### Refinement & Fix (Shared App Name Prefixes like `Zen` and `Zed`)
+- **Problem**: When apps shared initial prefix letters (e.g. `Zen` and `Zed`), `ComputeAppHints` previously only checked collisions against previously assigned hints instead of all other application names. `Zen` claimed hint `Z` while `Zed` claimed `ZE`. When typing `Z`, an exact match for `Zen` was found immediately, causing instant auto-activation before the user could finish typing (`ZE`, `ZEN`, or `ZED`).
+- **Fix**:
+  1. Updated `ComputeAppHints` collision loop to verify candidate prefixes against all other open application names (`_wcsnicmp(g_appGroups[other].appName, hintCandidate, len) == 0`). `Zen` and `Zed` now correctly calculate shortest unique hints `ZEN` and `ZED`.
+  2. Updated `MatchTypedBuffer` auto-activation threshold: typing `Z` or `ZE` now filters and highlights candidates without auto-activating because `totalMatches == 2`. Auto-activation triggers ONLY when `totalMatches == 1` (e.g. when typing `D` for `ZED` or `N` for `ZEN`).
+  3. Added single-key repeated press cycling in `WM_CHAR`: if `Z` is pressed again while the typed buffer is `"Z"`, the selection cycles cleanly to the next matching app (`Zed`), allowing single-key cycling as well as multi-letter search.
+
+8. **Full-Screen Monitor Background Effects System (`--background none|blur|dim|tint`)**:
+   - Added CLI flags: `--background` (`blur`, `dim`, `tint`, `none`), `--blur` (`1..100`), `--dim` (`0..100`), `--tint-color` (hex `#RRGGBB`), and `--tint-opacity` (`0..100`).
+   - Default: `--background blur --blur 20`.
+   - `ComputeLayout`: sizes and positions `g_hwndOverlay` across the **FULL active monitor bounds** (`mi.rcMonitor`).
+   - `ApplyWindowCompositionBlur`: calls `SetWindowCompositionAttribute` with `ACCENT_ENABLE_ACRYLICBLURBEHIND` for DWM Acrylic backdrop composition over the full monitor screen.
+   - `PaintOverlay`: fills full-screen backdrop with translucent GDI tint/dim colors while rendering window cards directly on the backdrop seamlessly.
+
+### Verification
+- Registered target `window-switcher` in `build.ps1` with libraries `user32`, `gdi32`, `dwmapi`, `shell32`, `ole32`.
+- Built release binary: `pwsh -File .\build.ps1 window-switcher` -> `dist/release/window-switcher.exe` (0 errors).
+- Built debug binary: `pwsh -File .\build.ps1 -Mode debug window-switcher` -> `dist/debug/window-switcher.exe` (0 errors).
+- Smoke tested executable launch and double-launch IPC toggle event handling.
+- Updated `AGENTS.md`, `docs/CHECKLIST.md`, `docs/JOURNEY.md`, and `docs/window-switcher.md`.
+
+---
+
+## [2026-09-06] 2D Grid Arrow Key Navigation & 3-Tier Match Priority Hierarchy (`window-switcher.c`)
+
+### Context & User Feedback
+1. **Vertical Arrow Navigation**: When navigating the window overlay grid using UP and DOWN arrow keys, selection previously moved by single item offsets (`-1` / `+1`) instead of jumping vertically across grid rows (`-cols` / `+cols`).
+2. **Hint vs Title Matching Collision**: When typing key `F` while both `File Pilot` (assigned app hint `F`) and `Windows Explorer` (window title `"File Explorer"`, assigned app hint `E`) were open, `Windows Explorer` matched because window title prefix matching competed directly with app hint matching.
+
+### Solution & Engineering Refinements
+1. **2D Grid Arrow Navigation**:
+   - Tracked total calculated columns (`g_layoutCols`) during layout computation.
+   - Refactored `VK_UP` to move index backward by `cols` (`(idx - cols + total) % total`), `VK_DOWN` to move forward by `cols` (`(idx + cols) % total`), `VK_LEFT` by `-1`, and `VK_RIGHT` by `+1`.
+2. **3-Tier Match Priority Hierarchy (`MatchTypedBuffer`)**:
+   - Structured search matching into explicit priority tiers:
+     - **Tier 1 (Exact App Hint Match)**: Checks if typed buffer matches an app's assigned shortcut hint exactly (e.g., `F` matches `File Pilot`). If Tier 1 matches exist, all title prefix matches are ignored.
+     - **Tier 2 (App Name / Hint Prefix Match)**: Checks if typed buffer is a prefix of app hint or app base name.
+     - **Tier 3 (Window Title Prefix Match)**: Fallback search matching against window title prefixes.
+   - Guaranteed exact app hint shortcuts take absolute priority over title prefix substrings, preventing `File Explorer` from stealing focus when `F` is typed for `File Pilot`.
+
+### Verification
+- Built release binary: `pwsh -File .\build.ps1 window-switcher` -> `dist/release/window-switcher.exe` (0 errors).
+- Built debug binary: `pwsh -File .\build.ps1 -Mode debug window-switcher` -> `dist/debug/window-switcher.exe` (0 errors).
+- Updated `docs/CHECKLIST.md` and `docs/JOURNEY.md`.
+
+
+---
+
+## [2026-09-06] Common Headers Enforcement Rule for AI Agents
+
+### Context & Goal
+Ensure AI agents always reuse existing shared common headers in `src/common/` (`tiny_cli.h`, `tiny_ipc.h`, `tiny_dpi.h`, `tiny_gui.h`, `font.h`, `clipboard.h`, `color-thief-algorithm.h`) rather than reinventing duplicate or custom implementations.
+
+### Key Changes
+1. **Updated `AGENTS.md`**: Added **COMMON HEADERS RULE** to the `## HARD RULES` section.
+2. **Updated Header Documentation**: Documented `font.h` and `clipboard.h` in the `## Shared Common Headers` section of `AGENTS.md`.
+
+### Verification
+- Verified `AGENTS.md` formatting and references to `src/common/` headers.
+
+---
+
+## [2026-09-06] Full-Screen Responsive Card Layout Mode (`window-switcher.c`)
+
+### Context & Goal
+User requested an experiment: to have open window cards dynamically scale and span across 100% of the active display screen rather than being constrained inside a fixed-size card container (220×175).
+
+### Solution & Engineering Refinements
+1. **Dynamic Full-Screen Card Layout Engine**:
+   - Added CLI option `--layout full|tile|center` (or `-l`), defaulting to `--layout full`.
+   - In `ComputeLayout`, when `--layout full` or `--layout tile` is selected, `availW` and `availH` are calculated dynamically from active monitor bounds (`monW` × `monH`).
+   - `cardW` and `cardH` scale up responsively (`availW / cols` and `availH / rows`) so that preview cards expand to occupy the entire monitor area.
+   - Preserved `--layout center` option for users who prefer the compact centered card box.
+
+### Verification
+- Built release binary: `pwsh -File .\build.ps1 window-switcher` -> `dist/release/window-switcher.exe` (0 errors).
+- Built debug binary: `pwsh -File .\build.ps1 -Mode debug window-switcher` -> `dist/debug/window-switcher.exe` (0 errors).
+- Updated `docs/window-switcher.md`, `docs/CHECKLIST.md`, and `docs/JOURNEY.md`.
+
+---
+
+## [2026-09-06] Base & Extended App Name Disambiguation Hints (`Notepad` vs `Notepad+`) (`window-switcher.c`)
+
+### Context & Goal
+User requested an improvement for apps where one app name is a base prefix of another (e.g. `Notepad` vs `Notepad+` or `Notepad++`):
+Assign the shortest prefix (e.g. `N`) to the base app (`Notepad`) and the base hint + distinguishing suffix (e.g. `N+` or `N++`) to the extended app (`Notepad+`).
+
+### Solution & Engineering Refinements
+1. **Base/Extended App Prefix Resolution in `ComputeAppHints`**:
+   - When evaluating prefix collision for app `g` (`Notepad`), if `g` is a strict base prefix of `other` (`Notepad+`), collision against `other` is bypassed so `g` claims the clean minimal prefix (`N`).
+   - For extended app `other` (`Notepad+`), its hint is constructed dynamically by taking the base app's hint (`N`) + the extra trailing distinguishing characters (`+`), producing `N+`.
+2. **Multi-Match Delay Guard in `MatchTypedBuffer`**:
+   - In Tier 1 exact hint matching, if `g_typedBuf` is `"N"`, exact hint match finds `Notepad` (`N`), but `prefixMatches` checks if any longer hint (like `"N+"`) also starts with `"N"`.
+   - If `prefixMatches > 1`, typing `N` highlights `Notepad` without auto-activating, giving the user time to type `+` for `Notepad+` (or hit `Enter`/`Space`/`Tab` for `Notepad`).
+
+### Verification
+- Built release binary: `pwsh -File .\build.ps1 window-switcher` -> `dist/release/window-switcher.exe` (0 errors).
+- Built debug binary: `pwsh -File .\build.ps1 -Mode debug window-switcher` -> `dist/debug/window-switcher.exe` (0 errors).
+- Updated `docs/window-switcher.md`, `docs/CHECKLIST.md`, and `docs/JOURNEY.md`.
+
+---
+
+## [2026-09-06] Prominent Centered Shortcut Hint Badges (`window-switcher.c`)
+
+### Context & Goal
+User feedback: Small hint badges tucked in the top-left corner required scanning text to read shortcut keys. Placing large, bold hint badges directly in the **center** of each app preview card (matching Vimarchy / Hyprland overlay switchers) makes shortcut keys instantly readable at a glance.
+
+### Solution & Engineering Refinements
+1. **Centered Prominent Hint Badge Rendering**:
+   - Created `g_hFontHintLarge` (24pt bold Segoe UI typography).
+   - In `PaintOverlay`, rendered App Name + Window Title in clean top header bar.
+   - Positioned rounded hint badge pill right in the center (`(left + right) / 2`, `(top + bottom) / 2`) of each app preview card over the live DWM thumbnail.
+   - Styled badge with high-contrast accent fill (`RGB(0, 110, 230)` selected, `RGB(20, 32, 48)` default) and bright border outline (`RGB(80, 190, 255)`).
+
+### Verification
+- Built release binary: `pwsh -File .\build.ps1 window-switcher` -> `dist/release/window-switcher.exe` (0 errors).
+- Built debug binary: `pwsh -File .\build.ps1 -Mode debug window-switcher` -> `dist/debug/window-switcher.exe` (0 errors).
+- Updated `docs/window-switcher.md`, `docs/CHECKLIST.md`, and `docs/JOURNEY.md`.
+
+---
+
+## [2026-09-07] Real UWP Process Name Resolution & Header Text Alignment Fix (`window-switcher.c`)
+
+### Context & User Feedback
+1. **UWP Store App Generic Process Name (`ApplicationFrameHost.exe`)**: UWP Windows Store apps (Calculator, Clock, Photos, Settings, etc.) run inside `ApplicationFrameHost.exe`. They all reported process name `"ApplicationFrameHost"`, causing them to group together under `A1`, `A2`, `A3` without individual application hints (`C`, `CL`, `S`).
+2. **Top Header Text Alignment**: The top status header text (`Window Switcher | Layout: Full ...`) had an offset margin (`g_containerRect.left + 20`), causing text alignment to be slightly off relative to the left margin of the grid container.
+
+### Solution & Engineering Refinements
+1. **Real UWP App Resolution (`GetUWPRealProcessId`)**:
+   - Added `GetUWPRealProcessId(hwnd)` helper querying child `Windows.UI.Core.CoreWindow` PID on `ApplicationFrameHost.exe` host windows.
+   - Replaced generic `ApplicationFrameHost` process names with real UWP app names (`CalculatorApp.exe` $\rightarrow$ `Calculator`, `TimeApp.exe` $\rightarrow$ `Clock`, etc.) or parsed clean app titles.
+   - `Calculator` now receives hint **`C`** (or `CA`), `Clock` receives hint **`CL`**, and `Settings` receives hint **`S`**.
+2. **Precision Header Text Alignment**:
+   - Aligned `headerRect.left` precisely to `g_containerRect.left`, matching the exact left margin baseline of the preview card grid.
+
+### Verification
+- Built release binary: `pwsh -File .\build.ps1 window-switcher` -> `dist/release/window-switcher.exe` (0 errors).
+- Built debug binary: `pwsh -File .\build.ps1 -Mode debug window-switcher` -> `dist/debug/window-switcher.exe` (0 errors).
+- Updated `docs/CHECKLIST.md` and `docs/JOURNEY.md`.
+
+---
+
+## [2026-09-07] Card Layout Preview Thumbnail Bottom Padding Fix (`window-switcher.c`)
+
+### Context & User Feedback
+User noticed that preview cards had an extra empty footer space at the bottom.
+
+### Cause & Solution
+- **Cause**: Previously, `padBottom = 32` reserved room for window titles at the bottom of cards. When titles moved to the top header bar, `padBottom` remained 32px, creating an empty dark gap below thumbnails.
+- **Fix**: Reduced `padBottom` from 32px to 8px across both `LAYOUT_FULL` and `LAYOUT_CENTER` modes. DWM live window thumbnails now expand seamlessly to fill the bottom of each card.
+
+### Verification
+- Built release binary: `pwsh -File .\build.ps1 window-switcher` -> `dist/release/window-switcher.exe` (0 errors).
+- Built debug binary: `pwsh -File .\build.ps1 -Mode debug window-switcher` -> `dist/debug/window-switcher.exe` (0 errors).
+- Updated `docs/CHECKLIST.md` and `docs/JOURNEY.md`.
+
+---
+
+## [2026-09-07] Right-Side Card Header Shortcut Hint Placement & Single-Window Consolidation (`window-switcher.c`)
+
+### Context & User Request
+User requested keeping the shortcut hint badge on the **right side of the title on each card header**.
+
+### Implementation & Architecture Benefits
+1. **Right-Aligned Header Hint Badge, Normal Font Size, Borderless Styling & Common Font Header Reuse**:
+   - Reused shared `font.h` module (`TinyFont_GetBestUIFace()`) for DPI-scaled system font selection across font constructors in `WM_CREATE`.
+   - Updated shortcut hint text to standard/normal bold font size (`g_hFontHint` 15pt bold) while preserving pure white text color (`RGB(255, 255, 255)`).
+   - Shortcut hint badge (`[ F ]`, `[ N+ ]`, `[ C1 ]`) renders cleanly on the right side of each card's top header bar (`r.right - 10 - badgeW` to `r.right - 10`).
+   - Removed badge border outline (`GetStockObject(NULL_PEN)`) for a modern borderless pill badge styling.
+   - Applied a distinct, vibrant accent background color (`RGB(0, 120, 240)` selected, `RGB(35, 85, 155)` hovered, `RGB(48, 64, 90)` normal) that stands out sharply against the dark card container background (`RGB(28, 30, 37)`).
+   - App title (`App Name — Window Title`) renders on the left side (`r.left + 10` to `badgeRect.left - 8`) with smooth ellipsis truncation (`DT_END_ELLIPSIS`).
+2. **Single-Window Architecture (`g_hwndOverlay` Only)**:
+   - Because the hint badge sits in the card header bar (`r.top+5` to `r.top+29`) strictly *above* `previewRect` (`r.top+34` to `r.bottom-8`), DWM live window preview thumbnails can **never** cover or obscure the hint badge or title text.
+   - Removed `g_hwndHintLayer`, eliminating all multi-window layered rendering overhead, Z-order flicker, and activation complexity.
+
+### Verification
+- Built release binary: `pwsh -File .\build.ps1 window-switcher` -> `dist/release/window-switcher.exe` (0 errors).
+- Built debug binary: `pwsh -File .\build.ps1 -Mode debug window-switcher` -> `dist/debug/window-switcher.exe` (0 errors).
+- Smoke tested single-instance IPC toggle pattern (`Global\TinyWindowSwitcherMutex` / `Global\TinyWindowSwitcherEvent`).
+- Updated `docs/CHECKLIST.md` and `docs/JOURNEY.md`.
+
+---
+
+## [2026-09-07] Shortest Unique Prefix/Subsequence Candidate Hint Algorithm (`window-switcher.c`)
+
+### Context & User Feedback
+User reported that the application hint computation algorithm was not generating shortest unique prefix/subsequence hints as intended (e.g. `Chrome -> C`, `Code -> CO`, `Chromium -> CH`, `Zen -> ZN`, `Zed -> ZD`).
+
+### Root Cause & Algorithm Redesign
+- **Root Cause**: The previous prefix loop generated contiguous prefixes (`C`, `CH`, `CHR`, `CHRO`, `CHROM`, `CHROME`) and checked if any prefix was a prefix of another open app. When multiple apps shared a prefix (e.g. `Chrome`, `Code`, `Chromium` all starting with `C`, or `Zen` and `Zed` both starting with `ZE`), `len=1` (`C`) collided with all of them, forcing `Chrome` to require `CHROME` (6 chars) and `Zen` to require `ZEN` (3 chars).
+- **New Candidate Prioritization Algorithm**:
+  1. Built a candidate generator `GenerateCandidateHints(appIdx, candidates, &outCount)` that generates ordered candidate hints:
+     - **Base + Extension**: For extended app names (e.g. `Notepad++` vs `Notepad`), generates base hint + suffix (`N+`).
+     - **Word Initials / Acronyms**: For multi-word apps (e.g. `File Pilot` -> `FP`, `Visual Studio Code` -> `VSC`).
+     - **Shared 2-Letter Prefix Distinguishing Characters**: When apps share the first 2 letters (e.g. `Zen` vs `Zed` sharing `ZE`), finds the first character index $k \ge 2$ where the names differ, producing 2-letter distinguishing hints (`ZN` for Zen, `ZD` for Zed).
+     - **Single-Letter Hint**: First letter $N[0]$ (`C` for Chrome).
+     - **Contiguous 2-Letter Prefix**: First 2 letters $N[0]N[1]$ (`CO` for Code, `CH` for Chromium).
+     - **Contiguous 3+ Letter Prefixes & Fallback Numbers**: (`CHR`, `C1`).
+  2. Multi-pass assignment selects the first available non-colliding candidate for each application group.
+
+### Output Verification & Results
+- `Chrome` -> `C`
+- `Code` -> `CO`
+- `Chromium` -> `CH`
+- `Zen` -> `ZN`
+- `Zed` -> `ZD`
+- `Notepad` -> `N`, `Notepad++` -> `N+`
+- `File Pilot` -> `FP`
+
+### Build & Verification
+- Compiled release binary: `pwsh -File .\build.ps1 window-switcher` -> `dist/release/window-switcher.exe` (0 warnings, 0 errors).
+- Updated `docs/window-switcher.md`, `docs/CHECKLIST.md`, and `docs/JOURNEY.md`.
+
+---
+
+## [2026-09-07] Windows Standard Alt-Tab Tile Grid Layout & App Grouping Verification (`window-switcher.c`)
+
+### Context & User Feedback
+1. User expected `--layout tile` to behave like the standard Windows Alt-Tab UI (a centered floating panel with neat 3:2 preview tile cards), but noticed it previously stretched edge-to-edge full screen.
+2. User requested checking whether grouping by application name (`--group app` / `--sort name`) was implemented and active.
+
+### Engineering Solution & Refinements
+1. **Windows Standard Alt-Tab Centered Tile Grid Layout (`LAYOUT_TILE`)**:
+   - Separated `LAYOUT_TILE` from `LAYOUT_FULL` in `ComputeLayout()`.
+   - `LAYOUT_TILE` calculates a centered floating container panel (`g_containerRect`) on the active monitor with rounded corners (`16px`), background fill (`RGB(24, 26, 33)`), and subtle outline border (`RGB(55, 60, 75)`).
+   - Arranges cards into a centered grid of up to 5 columns per row with fixed 240x160px tile dimensions (3:2 aspect ratio preview tiles) and 16px gap spacing, matching standard Windows Alt-Tab UI.
+   - Set `LAYOUT_TILE` as default layout mode in `g_cfg.layout`.
+2. **Application Grouping & Alt-Tab State Tracking**:
+   - Updated `wWinMain` to check `if (g_cfg.sort == SORT_NAME || g_cfg.group == GROUP_APP)` so that passing `--group app` explicitly sorts all open window cards by `appName` (and secondarily `title`), placing windows of the same application adjacent to each other.
+   - Added startup Alt-key state query (`g_altTabMode = (GetAsyncKeyState(VK_MENU) & 0x8000) != 0;`) so launching via Alt keybindings defaults selection to the 2nd item (MRU previous active window) and automatically switches upon releasing Alt key.
+
+### Verification & Build
+- Compiled release binary: `pwsh -File .\build.ps1 window-switcher` -> `dist/release/window-switcher.exe` (0 warnings, 0 errors).
+- Updated `docs/window-switcher.md`, `docs/CHECKLIST.md`, and `docs/JOURNEY.md`.
+
+---
+
+## [2026-09-07] Layout Simplification & Container Header Text Alignment Fix (`window-switcher.c`)
+
+### Context & User Feedback
+User requested removing `tile` layout mode (consolidating layout modes into `center` default and `full`) and fixing header text alignment on `center` so that `Window Switcher | Layout...` aligns precisely with the left edge of the cards inside the centered container panel instead of sitting against the container border.
+
+### Solution & Engineering Changes
+1. **Layout Consolidation**:
+   - Consolidated `LAYOUT_TILE` into `LAYOUT_CENTER` (default mode). `--layout tile` maps cleanly to `LAYOUT_CENTER` for CLI compatibility.
+   - `LAYOUT_CENTER` is the default layout mode, rendering a sleek centered container panel with 240x160px cards (up to 5 columns per row).
+2. **Text Alignment Fix**:
+   - Updated `headerRect` calculation in `PaintOverlay()`:
+     `int headerLeft = (g_cfg.layout == LAYOUT_CENTER) ? (g_containerRect.left + 20) : g_containerRect.left;`
+     `int headerTop  = (g_cfg.layout == LAYOUT_CENTER) ? (g_containerRect.top + 16) : (g_containerRect.top + 4);`
+     `RECT headerRect = { headerLeft, headerTop, g_containerRect.right - 20, headerTop + 24 };`
+   - `headerLeft` matches card column 0 left offset (`containerX + padding`), ensuring header status text aligns perfectly with the left edge of the cards.
+
+### Verification & Build
+- Compiled release binary: `pwsh -File .\build.ps1 window-switcher` -> `dist/release/window-switcher.exe` (0 warnings, 0 errors).
+- Updated `docs/window-switcher.md`, `docs/CHECKLIST.md`, and `docs/JOURNEY.md`.
+
+---
+
+## [2026-09-07] UI Layout Metrics Unification & Top Header Gap Elimination (`window-switcher.c`)
+
+### Context & User Feedback
+User inquired why `center` and `full` layouts had a large vertical gap between the top header status text (`Window Switcher | Layout...`) and the card grid, and asked if layout metrics were hardcoded inline instead of centralized.
+
+### Engineering Changes & Solution
+1. **Centralized UI Layout Metrics Constants**:
+   - Defined top-level layout metric constants at the header of `src/window-switcher.c`:
+     ```c
+     #define UI_CONTAINER_PADDING  18
+     #define UI_HEADER_HEIGHT       34
+     #define UI_CARD_GAP            16
+     #define UI_HEADER_TEXT_HEIGHT  22
+     ```
+2. **Vertical Gap Elimination**:
+   - Replaced scattered inline offset calculations in `ComputeLayout()` and `PaintOverlay()` with centralized constants.
+   - Fixed `headerH = UI_HEADER_HEIGHT` (`34px`) and `headerTop` positioning so the vertical gap between the status header text bottom and the top row of cards is reduced from 24px down to a clean, mathematically tight **12px** across both `LAYOUT_CENTER` and `LAYOUT_FULL` modes.
+
+### Verification & Build
+- Compiled release binary: `pwsh -File .\build.ps1 window-switcher` -> `dist/release/window-switcher.exe` (0 warnings, 0 errors).
+- Updated `docs/window-switcher.md`, `docs/CHECKLIST.md`, and `docs/JOURNEY.md`.
+
+---
+
+## [2026-09-07] Hex Color Alpha Parsing & `--tint-opacity` Removal (`window-switcher.c`)
+
+### Context & User Directives
+User requested removing `--tint-opacity` CLI flag and consolidating tint color and alpha into `--tint-color` using 8-character hex strings with alpha (e.g. `#00000005` or `#RRGGBBAA`).
+
+### Engineering Solution
+1. **Hex Color Alpha Parser (`ParseHexColorWithAlpha`)**:
+   - Parses 8-digit hex strings (`#RRGGBBAA` or `0xRRGGBBAA`): extracts `R`, `G`, `B` values and 8-bit `Alpha` opacity (e.g. `05` hex $\rightarrow$ `5` out of `255`).
+   - Parses 6-digit hex strings (`#RRGGBB`): extracts `RGB` and defaults `Alpha` to `255` (100% opacity).
+2. **CLI & Config Cleanup**:
+   - Removed `--tint-opacity` flag from `options` array in `ParseCLI()` and updated `Config` struct (`COLORREF tintColor`, `BYTE tintAlpha`).
+   - Updated `ShowHelp()` documentation and `PaintOverlay()` tint background blending.
+
+### Verification & Build
+- Compiled release binary: `pwsh -File .\build.ps1 window-switcher` -> `dist/release/window-switcher.exe` (0 warnings, 0 errors).
+- Updated `docs/window-switcher.md`, `docs/CHECKLIST.md`, and `docs/JOURNEY.md`.
+
+---
+
+## [2026-09-07] True DWM Translucent Tint Backdrop & Sort Mode Simplification (`window-switcher.c`)
+
+### Context & User Directives
+1. **Sort Mode Consolidation**: User requested removing `mru` and keeping `recent` (and `name`). Default sort order updated to `recent`. `--sort mru` maps to `SORT_RECENT` for CLI compatibility.
+2. **True DWM Translucent Backdrop Tint Fix**: User reported that passing `--tint-color #FFFFFF50` rendered a solid dimmed white box instead of a translucent 31% white tint layer over the desktop.
+
+### Root Cause & Engineering Fix
+- **Root Cause**: Previously, `PaintOverlay()` painted a 100% opaque solid RGB brush `bgFillColor` over the full screen DC `memDC`. GDI solid brush fills overwrote DWM's composition backdrop layer, turning translucent tint colors into solid opaque gray/dimmed-white pixels.
+- **Fix**:
+  1. Updated `ApplyBackgroundComposition(hwnd)` to apply `SetWindowCompositionAttribute` with `ACCENT_ENABLE_TRANSPARENTGRADIENT` and ABGR `gradientColor = (alpha << 24) | (b << 16) | (g << 8) | r`.
+  2. For `BG_BLUR`, `BG_DIM`, and `BG_TINT`, `PaintOverlay()` fills `memDC` with `RGB(0, 0, 0)`, allowing DWM's translucent composition layer to shine through cleanly over the desktop background behind the switcher.
+  3. Passing `--tint-color #FFFFFF50` now renders a true, translucent 31% white tint layer over desktop windows.
+
+### Verification & Build
+- Compiled release binary: `pwsh -File .\build.ps1 window-switcher` -> `dist/release/window-switcher.exe` (0 warnings, 0 errors).
+- Updated `docs/window-switcher.md`, `docs/CHECKLIST.md`, and `docs/JOURNEY.md`.
+
+---
+
+## [2026-09-07] Dual-Tier Composition Policy & Container Translucency for `--blur` (`window-switcher.c`)
+
+### Context & User Directives
+User reported that there was little to no noticeable visual difference between `--blur 1` and `--blur 100`.
+
+### Root Cause Analysis
+1. **Fixed DWM Kernel Blur Radius**: Windows 10/11 DWM (`SetWindowCompositionAttribute`) uses a fixed Gaussian blur kernel radius (~30px) for `ACCENT_ENABLE_ACRYLICBLURBEHIND`. Windows OS does not expose a variable pixel blur radius parameter in its composition policy.
+2. **Compressed Alpha Curve**: Previously, `blurAmount` (1..100) mapped linearly to acrylic tint alpha `(blurAmount * 220)/100 + 20` (alpha 22 to 240) using only Acrylic composition (`ACCENT_ENABLE_ACRYLICBLURBEHIND`), which only slightly adjusted the darkness of the frosted noise tint without altering the composition style.
+3. **Solid Container Panel Blocking DWM Composition**: In `PaintOverlay()`, `LAYOUT_CENTER` painted an opaque solid GDI brush (`RGB(24, 26, 33)`) over `g_containerRect`. This blocked DWM's blurred backdrop from showing through the container where all the cards sit.
+
+### Engineering Solution
+1. **Dual-Tier DWM Accent Policy Mapping**:
+   - **Low Blur (`1..30`)**: Mapped to Windows Aero Glass Blur (`ACCENT_ENABLE_BLURBEHIND`, policy state 3) with light gradient alpha (`5..80`). `--blur 1` produces an ultra-clear, translucent glass window where desktop windows behind the switcher are sharply visible through soft glass.
+   - **High Blur (`31..100`)**: Mapped to Windows Acrylic Frosted Blur (`ACCENT_ENABLE_ACRYLICBLURBEHIND`, policy state 4) with heavy gradient alpha (`85..255`). `--blur 100` produces a deep, dark, heavy acrylic backdrop.
+2. **Translucent Container Panel & Card Fills**:
+   - Updated `g_containerRect` background fill to `RGB(10, 12, 16)` and idle card backgrounds to `RGB(18, 20, 26)` when blur mode is active, allowing DWM backdrop composition to shine through the entire container panel.
+
+### Verification & Build
+- Compiled release binary: `pwsh -File .\build.ps1 window-switcher` -> `dist/release/window-switcher.exe` (0 warnings, 0 errors).
+- Verified dual-tier blur policy rendering and updated `docs/window-switcher.md`, `docs/CHECKLIST.md`, and `docs/JOURNEY.md`.
+
+---
+
+## [2026-09-07] Variable Tint Transparency & Auto `BG_TINT` Activation (`window-switcher.c`)
+
+### Context & User Directives
+User reported that transparency in tint felt broken and that passing `--tint-color #FFFFFF50` vs `--tint-color #FFFFFF90` resulted in the exact same background view.
+
+### Root Cause Analysis
+1. **Unset `bgMode` Default**: `g_cfg.bgMode` defaulted to `BG_BLUR`. When `--tint-color` was passed without `--background tint`, `bgMode` remained `BG_BLUR`, so `BG_TINT` logic was completely bypassed and the blur backdrop was applied both times.
+2. **Missing `WS_EX_LAYERED` Style**: Windows DWM (`ACCENT_ENABLE_TRANSPARENTGRADIENT`) requires `WS_EX_LAYERED` on the window along with `SetLayeredWindowAttributes` to enable variable composition alpha across the desktop backdrop. Without `WS_EX_LAYERED`, DWM renders a fixed solid/dim composition opacity regardless of alpha.
+
+### Engineering Solution
+1. **Automatic Tint Mode Selection**: Updated `ParseCLI()` to automatically set `g_cfg.bgMode = BG_TINT` whenever `--tint-color` is supplied on the CLI and `--background` was not explicitly passed.
+2. **Layered Window Attributes**: Added `WS_EX_LAYERED` to `CreateWindowExW()` and invoked `SetLayeredWindowAttributes(hwnd, 0, 255, LWA_ALPHA)` in `ApplyBackgroundComposition()`. Passing `#FFFFFF50` now produces a light 31% white translucent wash, while `#FFFFFF90` produces a distinct 56% white translucent wash.
+
+### Verification & Build
+- Compiled release binary: `pwsh -File .\build.ps1 window-switcher` -> `dist/release/window-switcher.exe` (0 warnings, 0 errors).
+- Updated `docs/window-switcher.md`, `docs/CHECKLIST.md`, and `docs/JOURNEY.md`.
+
+---
+
+## [2026-09-07] Removal of Dim Background Mode & Default Sort to Name (`window-switcher.c`)
+
+### Context & User Directives
+User requested removing `dim` background mode and changing the default sort order to `name`.
+
+### Engineering Solution
+1. **Removed `dim` Background Mode**:
+   - Removed `BG_DIM` from `BgMode` enum, `dimAmount` from `Config` struct, and `--dim` CLI option from `ShowHelp()` / `ParseCLI()`.
+   - Backdrop modes are streamlined to `blur`, `tint`, and `none`.
+2. **Default Sort Order `name`**:
+   - Updated `g_cfg.sort` default to `SORT_NAME` (alphabetical by app name). `--sort recent` remains available for MRU Z-order sorting.
+
+### Verification & Build
+- Compiled release binary: `pwsh -File .\build.ps1 window-switcher` -> `dist/release/window-switcher.exe` (0 warnings, 0 errors).
+- Updated `docs/window-switcher.md`, `docs/CHECKLIST.md`, and `docs/JOURNEY.md`.
+
+---
+
+## [2026-09-07] Container Panel Box Removal in Center Layout (`window-switcher.c`)
+
+### Context & User Directives
+User requested removing the background box and border around the centered layout container panel to eliminate the "box inside box" visual clutter.
+
+### Engineering Solution
+- Removed the container panel background fill (`panelBg`) and outer border (`RoundRect`) in `PaintOverlay()` for `LAYOUT_CENTER`.
+- Cards now float cleanly directly on the full-screen desktop backdrop (blur, tint, or none) while maintaining their centered 2D grid alignment and header status text.
+
+### Verification & Build
+- Compiled release binary: `pwsh -File .\build.ps1 window-switcher` -> `dist/release/window-switcher.exe` (0 warnings, 0 errors).
+- Updated `docs/window-switcher.md`, `docs/CHECKLIST.md`, and `docs/JOURNEY.md`.
+
+---
+
+## [2026-09-07] Status Header Text Alignment Fix in `LAYOUT_FULL` Mode (`window-switcher.c`)
+
+### Context & User Directives
+User reported that text alignment in `--layout full` (`-l full`) mode was off.
+
+### Root Cause & Engineering Fix
+- **Root Cause**: In `PaintOverlay()`, `headerLeft` for `LAYOUT_FULL` was calculated as `g_containerRect.left + 20` (which resulted in `20 + 20 = 40px`), while column 0 cards started at `marginX = 20px`. This caused the status header text to be indented 20px to the right of column 0 cards.
+- **Fix**: Updated `headerLeft` in `PaintOverlay()`:
+  `int headerLeft = (g_cfg.layout == LAYOUT_CENTER) ? (g_containerRect.left + UI_CONTAINER_PADDING) : g_containerRect.left;`
+  `headerLeft` in `LAYOUT_FULL` mode now evaluates directly to `g_containerRect.left` (`20px`), matching the left boundary of column 0 cards with 100% pixel precision.
+
+### Verification & Build
+- Compiled release binary: `pwsh -File .\build.ps1 window-switcher` -> `dist/release/window-switcher.exe` (0 warnings, 0 errors).
+- Updated `docs/window-switcher.md`, `docs/CHECKLIST.md`, and `docs/JOURNEY.md`.
+
+---
+
+## [2026-09-07] Contiguous App Grouping Fix for `--group app` & `--group window` (`window-switcher.c`)
+
+### Context & User Directives
+User reported that grouping appeared to always remain `none` regardless of the `--group` mode passed on the CLI.
+
+### Root Cause & Engineering Fix
+- **Root Cause**: `wWinMain()` previously only checked `if (g_cfg.sort == SORT_NAME || g_cfg.group == GROUP_APP)`. It did NOT check `g_cfg.group == GROUP_WINDOW`. Thus, passing `--group window` fell through to `qsort(..., CompareMRU)` or `CompareName` without sorting windows of the same app into contiguous adjacent card grid slots.
+- **Fix**:
+  1. Created `CompareAppGroup` comparator: sorts window items by `appName` first (so all windows belonging to the same app sit adjacently in consecutive card grid cells), and sub-sorts by `mruOrder` or `title`.
+  2. Updated `wWinMain()`: whenever `g_cfg.group != GROUP_NONE`, applies `qsort(..., CompareAppGroup)`.
+  3. Updated `ComputeAppHints()`:
+     - `--group app`: All windows of the app share the main app hint (e.g. `C`), allowing single-key shortcut typing to cycle focus through windows of the app.
+     - `--group window`: Windows of the app sit adjacently in the grid and receive distinct window sub-hints (`C1`, `C2`).
+     - `--group none`: Windows are sorted by the active sort mode without forcing contiguous app grouping.
+
+### Verification & Build
+- Compiled release binary: `pwsh -File .\build.ps1 window-switcher` -> `dist/release/window-switcher.exe` (0 warnings, 0 errors).
+- Updated `docs/window-switcher.md`, `docs/CHECKLIST.md`, and `docs/JOURNEY.md`.
+
+---
+
+## [2026-09-07] Search Filter Dynamic Grid Relayout & Group Option Removal (`window-switcher.c`)
+
+### Context & User Directives
+User requested:
+1. Remove `--group` CLI flag and grouping logic entirely.
+2. Implement dynamic search filter grid relayout: when characters are typed into the search filter (`g_typedBuf`), hide non-matching cards completely and dynamically recalculate grid column/row metrics (`ComputeLayout`) to display **only** matching windows on screen.
+
+### Architectural & Technical Implementation
+1. **Removal of `--group` Flag**:
+   - Removed `GroupMode` enum (`GROUP_NONE`, `GROUP_APP`, `GROUP_WINDOW`), `g_cfg.group`, `CompareAppGroup` comparator, and `-g, --group` CLI arguments.
+   - Simplified `wWinMain()` to sort by `name` (`CompareName`) or `recent` (`CompareMRU`).
+2. **Dynamic Filter & Live Grid Recalculation**:
+   - Implemented `IsItemMatchingFilter()` (case-insensitive search matching hint, app name, and title) and `GetFilteredIndices()`.
+   - Updated `ComputeLayout()`: computes grid dimensions based on `visibleCount = GetFilteredIndices(visibleIndices)`. If `visibleCount` is 0, layout reserves space for 1 placeholder message card ("No matching windows").
+   - Updated `PaintOverlay()`: iterates strictly over `visibleIndices` to render visible matching cards. Unmatched DWM live window thumbnails are explicitly hidden via `DWM_THUMBNAIL_PROPERTIES` with `fVisible = FALSE`.
+   - Navigation & Interactions: grid arrow navigation, single-key cycling, Tab/Backspace, mouse hover, and mouse click hit-testing operate exclusively over `visibleIndices`.
+
+### Verification & Build
+- Compiled release binary: `pwsh -File .\build.ps1 window-switcher` -> `dist/release/window-switcher.exe` (0 warnings, 0 errors).
+- Smoke tested dynamic filter typing and double-launch IPC toggle.
+- Updated `docs/window-switcher.md`, `docs/CHECKLIST.md`, and `docs/JOURNEY.md`.
+
+---
+
+## [2026-09-07] Background Mode Cleanup: Removed `none` (`window-switcher.c`)
+
+### Context & User Directives
+User requested: "remove none from bg"
+
+### Changes & Implementation
+1. **BgMode Enum & CLI Parsing**:
+   - Removed `BG_NONE` from `enum BgMode`, leaving `BG_BLUR` and `BG_TINT`.
+   - Updated `ParseCLI()` and `ShowHelp()` to restrict `-bg, --background` options strictly to `blur` or `tint` (`blur` default).
+2. **Rendering & Overlay Cleanup**:
+   - Removed `BG_NONE` condition from `ApplyBackdropEffect()` so `SetLayeredWindowAttributes` is always configured for translucent overlay window attributes.
+   - Updated `PaintOverlay()` status header string (`BG: Blur` or `BG: Tint`) and card background color rendering (`cardBg`).
+
+### Verification & Build
+- Compiled release target cleanly via `pwsh -File .\build.ps1 window-switcher` -> `dist/release/window-switcher.exe` (0 warnings, 0 errors).
+- Updated `docs/window-switcher.md`, `docs/CHECKLIST.md`, and `docs/JOURNEY.md`.
+
+---
+
+## [2026-09-07] Tiered Search Filter Priority & Instant Hint Auto-Activation (`window-switcher.c`)
+
+### Context & User Directives
+User reported: "check something is wrong with filter bcz when i pressed c then h then it should have made me go to that app instead why i have to press enter & why zed is showing?"
+
+### Root Cause Analysis
+1. **Unwanted Substring Matching**: `GetFilteredIndices()` previously performed a flat case-insensitive `wcsstr` substring search on `item->title`. Because `Zed`'s title contained `ch` (in a file path/name like `main.ch` / `checklist.md`), `Zed` matched `CH`, causing `visibleCount` to equal 2 (`Chrome` + `Zed`).
+2. **Auto-Activation Block**: Because `visibleCount` was 2 instead of 1, `MatchTypedBuffer()` did not auto-activate Chrome when `CH` was typed, forcing the user to press `Enter`.
+
+### Engineering Fixes
+1. **Tiered Filtering Priority (`GetFilteredIndices`)**:
+   - **Tier 1 & 2**: Checks App Name and Hint prefix/word matches (`IsItemAppOrHintMatch`). If any items match via hint or app name, those items are returned exclusively.
+   - **Tier 3 (Fallback)**: Title substring matching (`wcsstr`) is executed ONLY if zero items match by app name or hint. This filters out unrelated windows like `Zed` when typing app shortcut hints like `CH`.
+2. **Instant Hint Auto-Activation (`MatchTypedBuffer`)**:
+   - Checks if `g_typedBuf` is an exact match for an assigned hint (`_wcsicmp(hint, g_typedBuf) == 0`). If an exact hint match exists (e.g. `CH` for Chrome), the window auto-activates immediately.
+   - If a single matching window remains (`visibleCount == 1`) whose hint/appName prefix matches `g_typedBuf`, it auto-activates instantly without requiring `Enter`.
+
+### Verification & Build
+- Compiled release target cleanly via `pwsh -File .\build.ps1 window-switcher` -> `dist/release/window-switcher.exe` (0 warnings, 0 errors).
+- Updated `docs/window-switcher.md`, `docs/CHECKLIST.md`, and `docs/JOURNEY.md`.
+
+---
+
+## [2026-09-07] Configurable Auto-Activation Delay CLI Option (`-d, --delay <ms>`) (`window-switcher.c`)
+
+### Context & User Directives
+User requested: "add delay cli args in millisecond which will be used for delaying before goinh to window. This will help user if window-switcher has shotkey option c ch cm then user can fast press ch & go to that app instead of going c"
+
+### Engineering & Architectural Implementation
+1. **Config & CLI Option (`-d, --delay <ms>`)**:
+   - Added `delayMs` (range `0..5000`, default `300` ms) to `Config g_cfg`.
+   - Added CLI parsing for `-d, --delay <ms>` (e.g. `window-switcher.exe --delay 300`).
+2. **Key Interception & Alt Hold Timer Pause (`WM_SYSKEYDOWN` / `WM_SYSKEYUP`)**:
+   - Intercepts system keypresses (`WM_SYSKEYDOWN`, `WM_SYSKEYUP`) in `OverlayWndProc` so `Alt`, `Tab`, and shortcut keys (e.g. `Alt+C`, `Alt+H`) are captured cleanly during the session without losing focus or triggering default Windows menu sounds.
+   - On launch: starts a 300 ms countdown timer for the initial candidate window. If no keys are pressed within 300 ms, automatically switches to that window.
+   - While `Alt` is held (`IsAltKeyDown()`), the timer is **paused**.
+   - On keypress / navigation (`Tab`, letter keys, arrows, backspace), the selection updates and `TriggerAutoActivate()` resets the 300 ms commit timer back to zero.
+   - Releasing `Alt` (`WM_SYSKEYUP` / `WM_KEYUP` for `VK_MENU`) starts/restarts the 300 ms delay timer for the highlighted card.
+   - `Enter` / `Space` / `Mouse Click` activate immediately without delay; `Esc` cancels the timer and exits.
+
+### Verification & Build
+- Compiled release target cleanly via `pwsh -File .\build.ps1 window-switcher` -> `dist/release/window-switcher.exe` (0 warnings, 0 errors).
+- Verified Alt-hold key interception, system key routing, 300 ms timer reset, and release-unpause behavior.
+- Updated `docs/window-switcher.md`, `docs/CHECKLIST.md`, and `docs/JOURNEY.md`.
+
+---
+
+## [2026-09-07] Session Low-Level Keyboard Hook & Alt+Tab Cycling Fix (`window-switcher.c`)
+
+### Context & Problem Diagnosis
+User reported: "after the app is launched & while holding [Alt] I press tab it exits."
+
+### Root Cause Analysis
+1. **IPC Toggle Double-Launch Exit**: When AutoHotkey (AHK) binds `!Tab` to execute `window-switcher.exe`, pressing `Tab` a second time while holding `Alt` spawns a second instance of `window-switcher.exe`. The second instance calls `TinyIPC_AcquireOrToggle()`, signalling the named IPC event. The first instance woke up from `MsgWaitForMultipleObjectsEx` and unconditionally executed `break;`, closing the switcher immediately instead of advancing the selection.
+2. **Focus Loss (`WA_INACTIVE`)**: Pressing `Alt+Tab` could cause Windows to send `WM_ACTIVATE` (`WA_INACTIVE`) to the overlay window, which previously exited the application if active for >350ms.
+3. **Alt Key State Synchronization**: Standard window message queues without a low-level hook can miss `Alt` key releases if focus shifts briefly or system hotkeys consume keydown/keyup events.
+
+### Engineering & Architectural Fixes
+1. **Session-Lifetime Low-Level Keyboard Hook (`WH_KEYBOARD_LL`)**:
+   - Installed via `SetWindowsHookExW(WH_KEYBOARD_LL, LowLevelKeyboardProc, hInstance, 0)` upon launch.
+   - Cleanly removed via `UnhookWindowsHookEx(g_hKeyboardHook)` in `WM_DESTROY` and exit cleanup (strictly zero persistent hooks left on the system).
+   - Low-level hook intercepts `Tab`, `Shift+Tab`, `Alt` release (`VK_MENU`/`VK_LMENU`/`VK_RMENU`), prefix letter hints, arrows, `Backspace`, `Enter`, `Space`, and `Escape`.
+   - Dispatches clean custom messages (`WM_SWITCHER_TAB`, `WM_SWITCHER_ALT_UP`, etc.) to the main GUI thread, consuming handled keys (`return 1`) to prevent native Windows `Alt+Tab` UI conflicts.
+2. **IPC Toggle Event Alt-Held Awareness**:
+   - When the IPC toggle event is signalled while `IsAltKeyDown()` is true (e.g. AHK spawned a second instance on `Alt+Tab`), the running instance treats the event as a `Tab` press to advance selection forward (`HandleTab`), keeping the switcher open.
+3. **Alt-Hold Timer Pause & Release Resume**:
+   - Holding `Alt` keeps the auto-activate delay timer paused (`KillTimer`).
+   - Every keypress resets the delay timer.
+   - Releasing `Alt` starts/restarts the 300 ms countdown (`SetTimer` with `g_cfg.delayMs`).
+   - After 300 ms with no input, the selected window activates and the switcher exits cleanly.
+   - `Enter`, `Space`, or mouse click activate immediately. `Esc` or clicking outside cancels and exits.
+
+### Verification & Build
+- Compiled release target cleanly via `pwsh -File .\build.ps1 window-switcher` -> `dist/release/window-switcher.exe` (0 warnings, 0 errors).
+- Verified full key behavior specification: Alt-hold pauses timer, Tab cycles forward/backward, prefix keys filter/cycle, Alt release resumes 300 ms countdown, Enter/Space/Click activates immediately, Esc cancels, IPC toggle on Alt+Tab advances selection, and low-level hook cleanly unhooks on exit.
+- Updated `docs/window-switcher.md`, `docs/CHECKLIST.md`, and `docs/JOURNEY.md`.
+
+---
+
+## [2026-09-07] Executable Version Info Metadata Resolution for Chromium/Electron Apps (`window-switcher.c`)
+
+### Context & Problem
+User noticed: "i have a browser opened name helium but on hint shows c why?"
+
+### Root Cause Analysis
+Helium browser is installed at `...\Helium\Application\chrome.exe`. Because its executable filename on disk is `chrome.exe`, the previous implementation stripped `.exe` to get `Chrome` $\rightarrow$ hint `C`.
+
+### Solution
+1. Added `GetExeMetadataName()` in `src/window-switcher.c` using Win32 `GetFileVersionInfoW` and `VerQueryValueW` (linked against `version.lib`).
+2. Reads `FileDescription` and `ProductName` metadata strings across language translation tables (with fallback to default US English).
+3. Correctly identifies Helium as **`Helium`** (producing hint **`H`**) while falling back cleanly to executable basename if metadata is unavailable or generic.
+4. Updated `build.ps1` to link `version` library for `window-switcher`.
+
+### Verification & Build
+- Compiled release binary cleanly: `pwsh -File .\build.ps1 window-switcher` -> `dist/release/window-switcher.exe`.
+- Tested metadata extraction: `Helium` receives hint `H`.
+- Updated `docs/CHECKLIST.md`, `docs/JOURNEY.md`, and `build.ps1`.
+

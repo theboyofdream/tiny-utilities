@@ -1,6 +1,6 @@
 # AGENTS.md — Agent Guide
 
-Authoritative spec: **PRD.md**. Implementation status: **CHECKLIST.md**. Tool specs: `src/<tool>.c` -> `docs/<tool>.md` (`pin-to-top` | `find-my-mouse` | `color-picker` | `capture` | `pixel-view` | `ip-send` | `context-menu` | `ocr`) + `src/cmdx.ps1` -> `docs/cmdx.md`.
+Authoritative spec: **PRD.md**. Implementation status: **CHECKLIST.md**. Tool specs: `src/<tool>.c` -> `docs/<tool>.md` (`pin-to-top` | `find-my-mouse` | `color-picker` | `capture` | `pixel-view` | `ip-send` | `context-menu` | `ocr` | `window-switcher`) + `src/cmdx.ps1` -> `docs/cmdx.md`.
 
 ## HARD RULES
 
@@ -9,7 +9,8 @@ Authoritative spec: **PRD.md**. Implementation status: **CHECKLIST.md**. Tool sp
 - Must exit cleanly on toggle-off; compile with Clang (MSVC `clang-cl` or MinGW-w64 `clang`), never gcc. Strict Win32 C & GDI only (no DirectX).
 - Always explain what changes you made and why to the user after editing or creating any file.
 - **GIT RULE**: Agents must NOT run `git add`, `git commit`, or `git push` unless explicitly requested by the user.
-- **BUILD RULE**: Agents must ONLY build the target corresponding to the changed file: `pwsh -File .\build.ps1 [-Mode release|debug] <target>` (`pin-to-top` | `find-my-mouse` | `color-picker` | `capture` | `pixel-view` | `ip-send` | `context-menu` | `ocr` | `all`). Outputs to `dist/release/` (default optimized) or `dist/debug/` (PDB/DWARF symbols). Supports target aliases (e.g. `pin`, `cursor`, `snip`, `pixelview`, `ip`, `contextmenu`).
+- **BUILD RULE**: Agents must ONLY build the target corresponding to the changed file: `pwsh -File .\build.ps1 [-Mode release|debug] <target>` (`pin-to-top` | `find-my-mouse` | `color-picker` | `capture` | `pixel-view` | `ip-send` | `context-menu` | `ocr` | `window-switcher` | `all`). Outputs to `dist/release/` (default optimized) or `dist/debug/` (PDB/DWARF symbols). Supports target aliases (e.g. `pin`, `cursor`, `snip`, `pixelview`, `ip`, `contextmenu`, `switcher`).
+- **COMMON HEADERS RULE**: Agents must ALWAYS reuse shared common headers in `src/common/` (`tiny_cli.h`, `tiny_ipc.h`, `tiny_dpi.h`, `tiny_gui.h`, `font.h`, `clipboard.h`, `color-thief-algorithm.h`) for CLI argument parsing, IPC single-instance toggle handling, DPI awareness, GUI/overlay bounds, font creation, and clipboard access. NEVER reinvent custom/duplicate boilerplate implementations for functionality already provided by existing common headers.
 
 ## Shared Common Headers (`src/common/`)
 
@@ -17,6 +18,8 @@ Authoritative spec: **PRD.md**. Implementation status: **CHECKLIST.md**. Tool sp
 - [`tiny_ipc.h`](src/common/tiny_ipc.h): Single-instance mutex & event toggle pattern helper (`TinyIPC_AcquireOrToggle`).
 - [`tiny_dpi.h`](src/common/tiny_dpi.h): Per-Monitor v2 DPI awareness initializer with legacy fallbacks.
 - [`tiny_gui.h`](src/common/tiny_gui.h): Win32 GUI & overlay helpers (multi-monitor bounds `TinyGUI_GetVirtualScreenBounds`, alpha dimming `TinyGUI_ApplyDimOverlay`, border resize hit-testing `TinyGUI_HitTestResizeBorders`, scaled fonts).
+- [`font.h`](src/common/font.h): Centralized typography, monospace/UI font constructors, and physical DPI font scaling (`TinyFont_Create`, `TinyFont_CreateMonospace`, `TinyFont_ScaleSize`).
+- [`clipboard.h`](src/common/clipboard.h): Win32 Unicode text, bitmap, and file drop clipboard operations (`TinyClipboard_SetText`, `TinyClipboard_SetBitmap`, `TinyClipboard_GetText`).
 - [`color-thief-algorithm.h`](src/common/color-thief-algorithm.h): Dynamic dominant wallpaper accent color extractor.
 
 ## IPC Contract Overview
