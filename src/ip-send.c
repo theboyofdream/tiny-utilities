@@ -68,6 +68,10 @@ typedef struct {
 
 static AppState g_state = { 0 };
 static HWND g_hWnd = NULL;
+static HWND g_hEdit = NULL;
+static HBRUSH g_hEditBrush = NULL;
+static RECT g_msgEditRect = { 0 };
+static WNDPROC g_oldEditProc = NULL;
 static HANDLE g_hMutex = NULL;
 static HANDLE g_hEvent = NULL;
 static HFONT g_hFontNormal = NULL;
@@ -651,6 +655,9 @@ static bool FindIPMsgExecutable(wchar_t* outPath, DWORD maxLen) {
     return false;
 }
 
+// Forward declaration
+static LRESULT CALLBACK EditSubclassProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
+
 // Backend Send Execution
 static bool ExecuteSend(HWND hWnd) {
     // Check if IP Messenger is installed on system
@@ -665,6 +672,11 @@ static bool ExecuteSend(HWND hWnd) {
             L"IP Send - Error",
             MB_ICONERROR | MB_OK);
         return false;
+    }
+
+    if (g_hEdit && IsWindow(g_hEdit)) {
+        GetWindowTextW(g_hEdit, g_state.messageText, 1024);
+        g_state.messageLen = (int)wcslen(g_state.messageText);
     }
 
     EnsureIPMsgProcessRunning(ipcmdPath);
@@ -770,23 +782,89 @@ static void OpenFileDialog(HWND hWnd) {
     }
 }
 
-// Handle Paste (Ctrl+V)
-static void HandlePaste(HWND hWnd) {
-    if (g_state.messageMode) {
-        // Paste into message
-        if (OpenClipboard(hWnd)) {
-            HANDLE hData = GetClipboardData(CF_UNICODETEXT);
-            if (hData) {
-                wchar_t* clipText = (wchar_t*)GlobalLock(hData);
-                if (clipText) {
-                    wcscat_s(g_state.messageText, 1024, clipText);
-                    g_state.messageLen = (int)wcslen(g_state.messageText);
-                    GlobalUnlock(hData);
+// Subclass Procedure for native EDIT control
+static LRESULT CALLBACK EditSubclassProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    switch (msg) {
+    case WM_KEYDOWN:
+        if (wParam == VK_ESCAPE || wParam == VK_INSERT) {
+            GetWindowTextW(hWnd, g_state.messageText, 1024);
+            g_state.messageLen = (int)wcslen(g_state.messageText);
+            g_state.messageMode = false;
+            ShowWindow(hWnd, SW_HIDE);
+            SetFocus(g_hWnd);
+            InvalidateRect(g_hWnd, NULL, FALSE);
+            return 0;
+        }
+        if (wParam == 'A' && (GetKeyState(VK_CONTROL) & 0x8000)) {
+            SendMessageW(hWnd, EM_SETSEL, 0, -1);
+            return 0;
+        }
+        if (wParam == VK_BACK && (GetKeyState(VK_CONTROL) & 0x8000)) {
+            DWORD start = 0, end = 0;
+            SendMessageW(hWnd, EM_GETSEL, (WPARAM)&start, (LPARAM)&end);
+            if (start != end) {
+                SendMessageW(hWnd, EM_REPLACESEL, TRUE, (LPARAM)L"");
+            } else if (start > 0) {
+                int textLen = GetWindowTextLengthW(hWnd);
+                if (textLen > 0) {
+                    wchar_t* buf = (wchar_t*)malloc((textLen + 1) * sizeof(wchar_t));
+                    if (buf) {
+                        GetWindowTextW(hWnd, buf, textLen + 1);
+                        int pos = (int)start;
+                        while (pos > 0 && (buf[pos - 1] == L' ' || buf[pos - 1] == L'\t' || buf[pos - 1] == L'\r' || buf[pos - 1] == L'\n')) {
+                            pos--;
+                        }
+                        while (pos > 0 && buf[pos - 1] != L' ' && buf[pos - 1] != L'\t' && buf[pos - 1] != L'\r' && buf[pos - 1] != L'\n') {
+                            pos--;
+                        }
+                        free(buf);
+                        SendMessageW(hWnd, EM_SETSEL, (WPARAM)pos, (LPARAM)start);
+                        SendMessageW(hWnd, EM_REPLACESEL, TRUE, (LPARAM)L"");
+                    }
                 }
             }
-            CloseClipboard();
-            InvalidateRect(hWnd, NULL, FALSE);
+            return 0;
         }
+        if (wParam == 'D' && (GetKeyState(VK_CONTROL) & 0x8000)) {
+            g_lightTheme = !g_lightTheme;
+            g_themeManuallyToggled = true;
+            InvalidateRect(g_hWnd, NULL, FALSE);
+            InvalidateRect(hWnd, NULL, TRUE);
+            return 0;
+        }
+        if (wParam == 'O' && (GetKeyState(VK_CONTROL) & 0x8000)) {
+            OpenFileDialog(g_hWnd);
+            return 0;
+        }
+        if (wParam == VK_RETURN && (GetKeyState(VK_CONTROL) & 0x8000)) {
+            GetWindowTextW(hWnd, g_state.messageText, 1024);
+            g_state.messageLen = (int)wcslen(g_state.messageText);
+            ExecuteSend(g_hWnd);
+            return 0;
+        }
+        break;
+
+    case WM_CHAR:
+        if (wParam == 0x7F || (wParam == VK_BACK && (GetKeyState(VK_CONTROL) & 0x8000))) {
+            return 0; // Suppress control char 0x7F from Ctrl+Backspace
+        }
+        break;
+
+    case WM_KILLFOCUS:
+        GetWindowTextW(hWnd, g_state.messageText, 1024);
+        g_state.messageLen = (int)wcslen(g_state.messageText);
+        break;
+    }
+    return CallWindowProcW(g_oldEditProc, hWnd, msg, wParam, lParam);
+}
+
+// Handle Paste (Ctrl+V)
+static void HandlePaste(HWND hWnd) {
+    if (g_state.messageMode && g_hEdit && IsWindow(g_hEdit)) {
+        SendMessageW(g_hEdit, WM_PASTE, 0, 0);
+        GetWindowTextW(g_hEdit, g_state.messageText, 1024);
+        g_state.messageLen = (int)wcslen(g_state.messageText);
+        InvalidateRect(hWnd, NULL, FALSE);
         return;
     }
 
@@ -960,32 +1038,54 @@ static void RenderTUIWindow(HWND hWnd, HDC hdc) {
         y += 6;
     }
 
+    int maxTextWidth = width - (marginX * 2);
+    if (maxTextWidth < 200) maxTextWidth = 200;
+
+    int editH = 28;
     if (g_state.messageLen > 0 || g_state.messageMode) {
-        SetTextColor(memDC, textBright);
-        wchar_t msgBuf[1100];
-        if (g_state.messageMode) {
-            swprintf_s(msgBuf, 1100, L"> %s_", g_state.messageText);
-        } else {
-            swprintf_s(msgBuf, 1100, L"%s", g_state.messageText);
+        RECT calcRect = { 0, 0, maxTextWidth - 8, 10000 };
+        const wchar_t* measureStr = (g_state.messageLen > 0) ? g_state.messageText : L"A";
+        DrawTextW(memDC, measureStr, -1, &calcRect, DT_LEFT | DT_TOP | DT_WORDBREAK | DT_EDITCONTROL | DT_NOPREFIX | DT_CALCRECT);
+        int textH = calcRect.bottom - calcRect.top;
+        if (textH < 20) textH = 20;
+        editH = textH + 8;
+        if (editH < 28) editH = 28;
+        if (editH > 160) editH = 160;
+    }
+
+    g_msgEditRect.left = marginX;
+    g_msgEditRect.top = y;
+    g_msgEditRect.right = marginX + maxTextWidth;
+    g_msgEditRect.bottom = y + editH;
+
+    if (g_state.messageMode) {
+        if (g_hEdit) {
+            SetWindowPos(g_hEdit, NULL, g_msgEditRect.left, g_msgEditRect.top + 2, maxTextWidth, editH - 2, SWP_NOZORDER | SWP_SHOWWINDOW);
         }
 
-        int maxTextWidth = width - (marginX * 2);
-        if (maxTextWidth < 200) maxTextWidth = 200;
+        HPEN hBorderPen = CreatePen(PS_SOLID, 1, accentBlue);
+        HPEN oldP = (HPEN)SelectObject(memDC, hBorderPen);
+        HBRUSH oldB = (HBRUSH)SelectObject(memDC, GetStockObject(NULL_BRUSH));
+        Rectangle(memDC, g_msgEditRect.left - 4, g_msgEditRect.top - 2, g_msgEditRect.right + 4, g_msgEditRect.bottom + 2);
+        SelectObject(memDC, oldP);
+        SelectObject(memDC, oldB);
+        DeleteObject(hBorderPen);
 
-        RECT calcRect = { 0, 0, maxTextWidth, 10000 };
-        DrawTextW(memDC, msgBuf, -1, &calcRect, DT_LEFT | DT_TOP | DT_WORDBREAK | DT_EDITCONTROL | DT_NOPREFIX | DT_CALCRECT);
-
-        int msgH = calcRect.bottom - calcRect.top;
-        if (msgH < 22) msgH = 22;
-
-        RECT drawRect = { marginX, y, marginX + maxTextWidth, y + msgH };
-        DrawTextW(memDC, msgBuf, -1, &drawRect, DT_LEFT | DT_TOP | DT_WORDBREAK | DT_EDITCONTROL | DT_NOPREFIX);
-
-        y += msgH + 8;
+        y += editH + 10;
     } else {
-        SetTextColor(memDC, textDim);
-        TextOutW(memDC, marginX, y, L"No message. Press Insert to edit", 32);
-        y += 24;
+        if (g_hEdit && IsWindowVisible(g_hEdit)) {
+            ShowWindow(g_hEdit, SW_HIDE);
+        }
+        if (g_state.messageLen > 0) {
+            SetTextColor(memDC, textBright);
+            RECT drawRect = { marginX, y + 2, marginX + maxTextWidth, y + editH };
+            DrawTextW(memDC, g_state.messageText, -1, &drawRect, DT_LEFT | DT_TOP | DT_WORDBREAK | DT_EDITCONTROL | DT_NOPREFIX);
+            y += editH + 8;
+        } else {
+            SetTextColor(memDC, textDim);
+            TextOutW(memDC, marginX, y, L"No message. Press Insert to edit", 32);
+            y += 24;
+        }
     }
 
     int minTopContainerH = 44;
@@ -1155,6 +1255,9 @@ static void RecreateIPSendFonts(HWND hWnd) {
     g_hFontNormal = TinyFont_CreateMonospace(g_fontSize, TINY_FONT_WEIGHT_NORMAL, dpi);
     g_hFontBold = TinyFont_CreateMonospace(g_fontSize, TINY_FONT_WEIGHT_BOLD, dpi);
     g_hFontCaption = TinyFont_CreateMonospace(g_fontSize, TINY_FONT_WEIGHT_NORMAL, dpi);
+    if (g_hEdit && IsWindow(g_hEdit)) {
+        SendMessageW(g_hEdit, WM_SETFONT, (WPARAM)g_hFontNormal, TRUE);
+    }
 }
 
 // Window Procedure
@@ -1166,12 +1269,58 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
         g_fontSize = 13;
         g_lightTheme = IsSystemLightTheme();
         RecreateIPSendFonts(hWnd);
+
+        g_hEdit = CreateWindowExW(
+            0,
+            L"EDIT",
+            L"",
+            WS_CHILD | ES_MULTILINE | ES_AUTOVSCROLL | ES_LEFT | WS_TABSTOP,
+            0, 0, 0, 0,
+            hWnd,
+            (HMENU)1001,
+            ((LPCREATESTRUCT)lParam)->hInstance,
+            NULL
+        );
+        if (g_hEdit) {
+            SendMessageW(g_hEdit, WM_SETFONT, (WPARAM)g_hFontNormal, TRUE);
+            g_oldEditProc = (WNDPROC)SetWindowLongPtrW(g_hEdit, GWLP_WNDPROC, (LONG_PTR)EditSubclassProc);
+        }
         return 0;
+    }
+
+    case WM_CTLCOLOREDIT:
+    case WM_CTLCOLORSTATIC: {
+        if ((HWND)lParam == g_hEdit) {
+            HDC hdcEdit = (HDC)wParam;
+            COLORREF bgVoid = g_lightTheme ? RGB(0xF8, 0xF9, 0xFC) : RGB(0x12, 0x12, 0x12);
+            COLORREF textBright = g_lightTheme ? RGB(0x11, 0x14, 0x1A) : RGB(0xEE, 0xEE, 0xEE);
+            SetTextColor(hdcEdit, textBright);
+            SetBkColor(hdcEdit, bgVoid);
+            if (g_hEditBrush) DeleteObject(g_hEditBrush);
+            g_hEditBrush = CreateSolidBrush(bgVoid);
+            return (LRESULT)g_hEditBrush;
+        }
+        break;
+    }
+
+    case WM_COMMAND: {
+        if (LOWORD(wParam) == 1001 && HIWORD(wParam) == EN_CHANGE) {
+            if (g_hEdit && IsWindow(g_hEdit)) {
+                GetWindowTextW(g_hEdit, g_state.messageText, 1024);
+                g_state.messageLen = (int)wcslen(g_state.messageText);
+                InvalidateRect(hWnd, NULL, FALSE);
+            }
+            return 0;
+        }
+        break;
     }
 
     case WM_SETTINGCHANGE: {
         if (!g_themeManuallyToggled) {
             g_lightTheme = IsSystemLightTheme();
+            if (g_hEdit && IsWindow(g_hEdit)) {
+                InvalidateRect(g_hEdit, NULL, TRUE);
+            }
             InvalidateRect(hWnd, NULL, FALSE);
         }
         return 0;
@@ -1261,6 +1410,29 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
             return 0;
         }
 
+        if (PtInRect(&g_msgEditRect, pt)) {
+            g_state.messageMode = true;
+            if (g_hEdit) {
+                SetWindowTextW(g_hEdit, g_state.messageText);
+                SetWindowPos(g_hEdit, NULL, g_msgEditRect.left, g_msgEditRect.top,
+                             g_msgEditRect.right - g_msgEditRect.left,
+                             g_msgEditRect.bottom - g_msgEditRect.top,
+                             SWP_NOZORDER | SWP_SHOWWINDOW);
+                SetFocus(g_hEdit);
+            }
+            InvalidateRect(hWnd, NULL, FALSE);
+            return 0;
+        }
+
+        if (g_state.messageMode && !PtInRect(&g_msgEditRect, pt)) {
+            if (g_hEdit) {
+                GetWindowTextW(g_hEdit, g_state.messageText, 1024);
+                g_state.messageLen = (int)wcslen(g_state.messageText);
+                ShowWindow(g_hEdit, SW_HIDE);
+            }
+            g_state.messageMode = false;
+        }
+
         if (pt.y >= g_listStartY && pt.y < g_listStartY + g_state.visibleRows * g_itemHeight) {
             int rowIdx = (pt.y - g_listStartY) / g_itemHeight;
             int itemIdx = g_state.scrollOffset + rowIdx;
@@ -1299,6 +1471,9 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
                         i++;
                         wcscpy_s(g_state.messageText, 1024, argv[i]);
                         g_state.messageLen = (int)wcslen(g_state.messageText);
+                        if (g_hEdit && IsWindow(g_hEdit)) {
+                            SetWindowTextW(g_hEdit, g_state.messageText);
+                        }
                     } else if ((_wcsicmp(argv[i], L"--to") == 0 || _wcsicmp(argv[i], L"-t") == 0) && i + 1 < argc) {
                         i++;
                     } else if (_wcsicmp(argv[i], L"--theme") == 0 && i + 1 < argc) {
@@ -1372,13 +1547,22 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
         if (ctrlDown && (wParam == 'D' || wParam == 'd')) {
             g_lightTheme = !g_lightTheme;
             g_themeManuallyToggled = true;
+            if (g_hEdit && IsWindow(g_hEdit)) {
+                InvalidateRect(g_hEdit, NULL, TRUE);
+            }
             InvalidateRect(hWnd, NULL, FALSE);
             return 0;
         }
 
         if (wParam == VK_ESCAPE) {
             if (g_state.messageMode) {
+                if (g_hEdit) {
+                    GetWindowTextW(g_hEdit, g_state.messageText, 1024);
+                    g_state.messageLen = (int)wcslen(g_state.messageText);
+                    ShowWindow(g_hEdit, SW_HIDE);
+                }
                 g_state.messageMode = false;
+                SetFocus(hWnd);
                 InvalidateRect(hWnd, NULL, FALSE);
             } else {
                 DestroyWindow(hWnd);
@@ -1386,8 +1570,27 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
             return 0;
         }
 
-        if (!g_state.messageMode && wParam == VK_INSERT) {
-            g_state.messageMode = true;
+        if (wParam == VK_INSERT) {
+            g_state.messageMode = !g_state.messageMode;
+            if (g_state.messageMode) {
+                if (g_hEdit) {
+                    SetWindowTextW(g_hEdit, g_state.messageText);
+                    SetWindowPos(g_hEdit, NULL, g_msgEditRect.left, g_msgEditRect.top,
+                                 g_msgEditRect.right - g_msgEditRect.left,
+                                 g_msgEditRect.bottom - g_msgEditRect.top,
+                                 SWP_NOZORDER | SWP_SHOWWINDOW);
+                    SetFocus(g_hEdit);
+                    int len = (int)wcslen(g_state.messageText);
+                    SendMessageW(g_hEdit, EM_SETSEL, (WPARAM)len, (LPARAM)len);
+                }
+            } else {
+                if (g_hEdit) {
+                    GetWindowTextW(g_hEdit, g_state.messageText, 1024);
+                    g_state.messageLen = (int)wcslen(g_state.messageText);
+                    ShowWindow(g_hEdit, SW_HIDE);
+                }
+                SetFocus(hWnd);
+            }
             InvalidateRect(hWnd, NULL, FALSE);
             return 0;
         }
@@ -1402,9 +1605,8 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
             MessageBoxW(hWnd,
                 L"\x2191/\x2193      Navigate recipients\n"
                 L"Space    Toggle selection\n"
-                L"Enter    Send (or newline in message mode)\n"
-                L"Insert   Edit message\n"
-                L"Tab      Toggle message / search\n"
+                L"Enter    Send\n"
+                L"Insert   Edit message (normal text box)\n"
                 L"r        Refresh recipients\n"
                 L"Ctrl+O   Attach file\n"
                 L"Ctrl+D   Toggle Light / Dark theme\n"
@@ -1418,22 +1620,7 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
             return 0;
         }
 
-        if (wParam == VK_TAB) {
-            g_state.messageMode = !g_state.messageMode;
-            InvalidateRect(hWnd, NULL, FALSE);
-            return 0;
-        }
-
         if (wParam == VK_RETURN) {
-            if (g_state.messageMode) {
-                if (g_state.messageLen < 1000) {
-                    g_state.messageText[g_state.messageLen++] = L'\n';
-                    g_state.messageText[g_state.messageLen] = L'\0';
-                    g_skipNextCharForNewline = true;
-                    InvalidateRect(hWnd, NULL, FALSE);
-                }
-                return 0;
-            }
             ExecuteSend(hWnd);
             return 0;
         }
@@ -1483,16 +1670,6 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
                 }
                 return 0;
             }
-        } else {
-            // Message edit mode keys
-            if (wParam == VK_BACK) {
-                if (g_state.messageLen > 0) {
-                    g_state.messageLen--;
-                    g_state.messageText[g_state.messageLen] = L'\0';
-                    InvalidateRect(hWnd, NULL, FALSE);
-                }
-                return 0;
-            }
         }
         break;
     }
@@ -1526,25 +1703,16 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
         wchar_t ch = (wchar_t)wParam;
         if (ch < 32 && ch != '\r' && ch != '\n' && ch != '\t') return 0;
 
-        if (g_state.messageMode) {
-            if ((ch >= 32 || ch == '\t') && g_state.messageLen < 1000) {
-                g_state.messageText[g_state.messageLen++] = ch;
-                g_state.messageText[g_state.messageLen] = L'\0';
-                InvalidateRect(hWnd, NULL, FALSE);
-            }
-        } else {
-            // Don't capture 'i', 'r', or '/' as search char if query is empty and triggering mode/refresh/hints
-            if ((ch == L'i' || ch == L'I') && g_state.searchLen == 0) return 0;
-            if ((ch == L'r' || ch == L'R') && g_state.searchLen == 0) return 0;
-            if (ch == L'/' && g_state.searchLen == 0) return 0;
-            if (ch == L' ' && g_state.searchLen == 0) return 0; // Space toggles selection when search empty
+        // Don't capture 'r' or '/' as search char if query is empty and triggering refresh/hints
+        if ((ch == L'r' || ch == L'R') && g_state.searchLen == 0) return 0;
+        if (ch == L'/' && g_state.searchLen == 0) return 0;
+        if (ch == L' ' && g_state.searchLen == 0) return 0; // Space toggles selection when search empty
 
-            if (ch >= 32 && g_state.searchLen < 60) {
-                g_state.searchQuery[g_state.searchLen++] = ch;
-                g_state.searchQuery[g_state.searchLen] = L'\0';
-                FilterRecipients();
-                InvalidateRect(hWnd, NULL, FALSE);
-            }
+        if (ch >= 32 && g_state.searchLen < 60) {
+            g_state.searchQuery[g_state.searchLen++] = ch;
+            g_state.searchQuery[g_state.searchLen] = L'\0';
+            FilterRecipients();
+            InvalidateRect(hWnd, NULL, FALSE);
         }
         return 0;
     }
@@ -1576,6 +1744,7 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
         if (g_hFontNormal) DeleteObject(g_hFontNormal);
         if (g_hFontBold) DeleteObject(g_hFontBold);
         if (g_hFontCaption) DeleteObject(g_hFontCaption);
+        if (g_hEditBrush) DeleteObject(g_hEditBrush);
         PostQuitMessage(0);
         return 0;
     }

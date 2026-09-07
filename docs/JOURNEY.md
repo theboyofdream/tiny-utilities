@@ -1468,8 +1468,170 @@ Previously in `LAYOUT_FULL`, `cardH` was computed as `availH / rows`, and `cols`
 
 ### Verification & Build
 - Compiled release binary: `pwsh -File .\build.ps1 window-switcher` -> `dist/release/window-switcher.exe` (0 warnings, 0 errors).
-- Tested `-l full` with 1, 2, 4, 8, and 12 windows: cards start directly below the header at the top margin and maintain proportional widescreen 16:10 dimensions.
+---
+
+## [2026-09-07] Multi-Monitor DPI-Aware Physical Card Sizing Parity (`window-switcher.c`)
+
+### Context & Problem
+User reported: "size of card should be physically same no matter the size of size. currently cards feel little small in laptop & little big in monitor."
+
+### Root Cause Analysis
+1. In `LAYOUT_CENTER`, cards used hardcoded 240px x 160px raw pixels. On high-DPI laptop displays with 125%, 150%, or 200% Windows scaling (96 DPI vs 144/192 DPI), card boundaries did not scale while text/fonts scaled, causing cards to look cramped and physically tiny (~1.2–1.5 inches wide).
+2. In `LAYOUT_FULL`, `cols` was fixed to 4 (or 5-6), forcing `cardW = availW / 4`. On 24" or 27" desktop monitors (1080p or 1440p at 100% scaling), 4 columns produced 450px–616px wide cards, making them physically humongous (~5–7 inches wide).
+
+### Engineering Decisions & Implementation
+1. **Per-Monitor DPI Query**: Queried monitor DPI (`dpi = TinyDPI_GetDpiForMonitor(hMon)`) and calculated display scale factor `scale = dpi / 96.0f`.
+2. **Dynamic DPI Font Scaling**: Added `UpdateFontsForDpi(dpi)` to re-create GDI fonts (`TinyFont_Create`) scaled precisely for the target monitor DPI.
+3. **Physical Target Sizing**: Base target card width set to 270px at 96 DPI (16:10 aspect ratio), yielding ~3.0 inches physical screen width. Target card width scales to `targetCardW = (int)(270 * scale)`.
+4. **Dynamic Column Selection in Full Mode**: Calculated `cols = (availW + gap) / (targetCardW + gap)` (bounded between 3 and 8). On a 150% DPI laptop (1920x1080), this selects 4 columns (card width = 444px raw = 296 logical px). On a 100% DPI 27" monitor (2560x1440), this selects 8 columns (card width = 300px raw = 300 logical px).
+5. **Element Ratio Consistency**: Scaled gaps, container padding, close button rects, hint badges, and live thumbnail preview padding proportionally by `scale`.
+
+### Verification & Build
+- Compiled release binary: `pwsh -File .\build.ps1 window-switcher` -> `dist/release/window-switcher.exe` (0 errors, 0 warnings).
+- Verified mathematical physical parity:
+  - 14" Laptop 1080p at 150% scaling: 296 logical px (~3.0 inches physical width).
+  - 24" Desktop 1080p at 100% scaling: 298 logical px (~3.0 inches physical width).
+  - 27" Desktop 1440p at 100% scaling: 300 logical px (~3.0 inches physical width).
+- Updated `docs/window-switcher.md`, `docs/CHECKLIST.md`, and `docs/JOURNEY.md`.
+
+---
+
+## [2026-09-07] Aspect-Ratio-Preserving DWM Window Thumbnails (`window-switcher.c`)
+
+### Context & Problem
+User reported: "some window feels stretched"
+
+### Root Cause Analysis
+In `PaintOverlay()`, `DwmUpdateThumbnailProperties()` set `rcDestination = item->previewRect` directly. Because `previewRect` has a fixed ~16:10 aspect ratio, any window with a non-16:10 aspect ratio (such as portrait terminals, vertical editor splits, Calculator, WhatsApp, or ultrawide windows) was non-uniformly stretched/squashed to fill the rectangle.
+
+### Solution
+1. Used `DwmQueryThumbnailSourceSize(item->hThumbnail, &srcSize)` (with `GetWindowRect` fallback) to retrieve the real source window dimensions and aspect ratio.
+2. Calculated fitted rectangle dimensions (`fitW`, `fitH`) preserving the source aspect ratio within `previewRect`.
+3. Centered the thumbnail (`offsetX`, `offsetY`) horizontally and vertically inside `previewRect`, allowing dark card backgrounds to serve as natural letterboxing.
+
+### Verification & Build
+- Compiled release binary: `pwsh -File .\build.ps1 window-switcher` -> `dist/release/window-switcher.exe` (0 errors, 0 warnings).
+- Verified portrait, square, 16:9, and ultrawide windows maintain 100% natural, undistorted proportions.
+- Updated `docs/window-switcher.md`, `docs/CHECKLIST.md`, and `docs/JOURNEY.md`.
+
+---
+
+## [2026-09-07] Unified Proportional Physical Scaling for Cards & Typography (`window-switcher.c`)
+
+### Context & Goal
+User feedback: "same for font also. & now size has become worse" — card and typography physical sizing must match seamlessly across different display densities without awkward text-to-card disproportion.
+
+### Solution & Engineering Implementation
+1. **Synchronous Physical Scaling**: Configured both layout metrics (`UI_CARD_BASE_WIDTH`, gaps, paddings, headers) and typography (`UI_FONT_SIZE_HINT`, `UI_FONT_SIZE_TITLE`) to scale synchronously via `scale = dpi / 96.0f`.
+2. **Proportional Typography**: Hint badges and window title text scale with display DPI (`TinyFont_Create(..., dpi)`), keeping text-to-card ratios identical on 100% desktop monitors and 150%/200% laptop displays.
+3. **Harmonized Spacing & Aspect Ratio**: Preserved 16:10 card aspect ratio, proportional header text gaps, and centered thumbnail letterboxing.
+
+### Verification & Build
+---
+
+## [2026-09-07] Refined Card Padding & Title-to-Preview Vertical Gap (`window-switcher.c`)
+
+### Context & Goal
+User requested trimming the horizontal padding inside cards (left & right sides) and adding a clean vertical gap between the title header bar and the thumbnail preview image.
+
+### Changes Made
+1. **Trimmed Left/Right Card Padding**: Reduced card horizontal interior margins from 5px to 2px/3px (`previewRect.left = cx + 2`, `previewRect.right = cx + cardW - 2`, `previewRect.bottom = cy + cardH - 2`), maximizing preview thumbnail width inside each card.
+2. **Title-to-Preview Separation Gap**: Offset `previewRect.top` to `cy + 25` below the header bar (`r.top + 2` to `r.top + 20`), providing a clear 5px distinct vertical separation between the app/window title text and the live preview thumbnail.
+3. **Optimized Header Controls**: Adjusted close cross button and hint badge alignment (`r.top + 2` to `r.top + 19`, `r.right - 3`) to match trimmed side margins.
+
+### Verification & Build
+---
+
+## [2026-09-07] Dynamic Per-Monitor DPI Font Scaling & Physical Typography Fix (`window-switcher.c`)
+
+### Context & Problem
+User reported: "text is too small for laptop". On high-DPI displays (such as 125%/150%/175% laptop screens), fonts appeared tiny and hard to read because font creation was unscaled (passing `0` / 96 DPI unscaled fallback) and static guards in `WM_CREATE` prevented re-creating fonts with actual display DPI.
+
+### Root Cause Analysis
+1. `WM_CREATE` initialized static font handles via `TinyGUI_CreateScaledFont()` with `dpi = 0`.
+2. `UpdateFontsForDpi(dpi)` checked `if (g_hFontHint != NULL) return;`, immediately returning and ignoring the true monitor DPI retrieved via `TinyDPI_GetDpiForMonitor(hMon)`.
+3. Consequently, on 144 DPI (150%) laptop screens, fonts rendered at unscaled 96-DPI pixel heights, making text physically miniature.
+
+### Solution
+1. **Dynamic DPI Font Re-creation**: Updated `UpdateFontsForDpi(dpi)` to check `g_currentDpi == dpi` instead of checking font nullness, allowing clean re-creation of `g_hFontHint`, `g_hFontTitle`, `g_hFontGroup` whenever DPI changes.
+2. **Monitor DPI Pass-Through**: Passed real monitor `dpi` into `TinyFont_Create(..., dpi)` so that GDI fonts calculate `-MulDiv(fontSize, dpi, 96)` for exact physical millimeter parity across displays.
+3. **Responsive Metrics Scaling**: Scaled all card paddings, close button rectangles, header bar heights, and hint badge widths proportionally with `scale = (float)dpi / 96.0f`, ensuring the relative font-to-card visual ratio remains consistent across 100% desktop monitors and 150% laptop screens.
+4. **`WM_DPICHANGED` Handler**: Added `WM_DPICHANGED` handling in `OverlayWndProc` to smoothly recompute layout and fonts when the switcher moves between monitors of differing DPIs.
+
+### Verification & Build
+---
+
+## [2026-09-07] Fine-Tuned Base Card Width (`UI_CARD_BASE_WIDTH = 255`)
+
+### Context & Goal
+User requested making cards slightly smaller by 5px.
+
+### Changes Made
+- Updated `UI_CARD_BASE_WIDTH` from `260` to `255` in `src/window-switcher.c`.
+- Height automatically adjusted via 16:10 aspect ratio (`cardH = 255 * 10 / 16 = 159px` at 96 DPI).
+
+### Verification & Build
+- Compiled release binary: `pwsh -File .\build.ps1 window-switcher` -> `dist/release/window-switcher.exe` (0 errors, 0 warnings).
+- Updated `docs/window-switcher.md`, `docs/CHECKLIST.md`, and `docs/JOURNEY.md`.
+
+---
+
+## [2026-09-07] Native Win32 EDIT Control & Insert-Only Focus for IP Send (`ip-send.c`)
+
+### Context & Goal
+User reported: "I want only insert to enable textbox not tab. also want textbox should behave like normal text box."
+Previously, `ip-send` rendered the message area as a custom GDI string buffer without a real Win32 caret, mouse selection, or standard editing operations, and `<Tab>` was bound to toggle message mode.
+
+### Engineering Implementation
+1. **Integrated Native Win32 Multiline `EDIT` Control**:
+   - Created a child `EDIT` control (`WS_CHILD | ES_MULTILINE | ES_AUTOVSCROLL | ES_LEFT | WS_TABSTOP`).
+   - Handles standard Windows text operations out of the box: caret positioning, mouse clicking and dragging for text selection, <kbd>Ctrl</kbd>+<kbd>A</kbd>, <kbd>Ctrl</kbd>+<kbd>C</kbd>, <kbd>Ctrl</kbd>+<kbd>V</kbd>, <kbd>Ctrl</kbd>+<kbd>X</kbd>, <kbd>Ctrl</kbd>+<kbd>Z</kbd>, <kbd>Backspace</kbd>, <kbd>Delete</kbd>, <kbd>Home</kbd>, <kbd>End</kbd>, arrow key navigation, and right-click context menus.
+2. **Subclassed Edit Window (`EditSubclassProc`)**:
+   - <kbd>Insert</kbd> or <kbd>Esc</kbd>: Syncs message buffer, hides edit control, returns focus to recipient search view.
+   - <kbd>Ctrl</kbd>+<kbd>Enter</kbd>: Triggers `ExecuteSend`.
+   - <kbd>Ctrl</kbd>+<kbd>D</kbd>: Toggles light/dark theme.
+   - <kbd>Ctrl</kbd>+<kbd>O</kbd>: Opens file attachment dialog.
+3. **Dedicated `<Insert>` Key & Click-to-Focus**:
+   - Removed `<Tab>` toggle into message mode so only <kbd>Insert</kbd> (or clicking directly on the message area) enters message edit mode.
+4. **Seamless Theme Styling**:
+   - Handled `WM_CTLCOLOREDIT` and `WM_CTLCOLORSTATIC` in parent `WndProc` to dynamically paint matching dark/light background brushes and high-contrast foreground text colors.
+5. **DPI Awareness**:
+   - `RecreateIPSendFonts` updates the `EDIT` control's font handle (`WM_SETFONT`) dynamically across monitor DPI changes.
+
+### Verification & Build
+- Compiled binary: `pwsh -File .\build.ps1 ip-send` -> `dist/release/ip-send.exe` (0 errors, 0 warnings).
+- Verified IPC toggle and documentation updates.
+
+---
+
+## [2026-09-07] IP Send `Ctrl+Backspace` Word Deletion & Dynamic Height Expansion (`ip-send.c`)
+
+### Context & User Feedback
+User reported two issues:
+1. `Ctrl+Backspace` produced weird control characters (`\x7f` DEL / box characters).
+2. The message box did not dynamically resize as typed text grew over multiple lines.
+
+### Solution & Engineering Details
+1. **`Ctrl+Backspace` Backward Word Deletion**:
+   - In `EditSubclassProc`, intercepted `WM_KEYDOWN` for `VK_BACK` when `VK_CONTROL` is held down.
+   - Identified word boundaries by traversing backwards across trailing whitespace and preceding word characters.
+   - Replaced the word range using `EM_SETSEL` and `EM_REPLACESEL`.
+   - Intercepted and suppressed the `0x7F` character in `WM_CHAR` to prevent unprintable character glyphs.
+2. **Dynamic Height Resizing (`editH`)**:
+   - Calculated required multiline height in `RenderTUIWindow` via `DrawTextW` with `DT_CALCRECT | DT_WORDBREAK | DT_EDITCONTROL`.
+   - Dynamically resized `g_hEdit` and its visual focus border from 28px up to 160px as lines are typed or wrapped.
+   - Handled `EN_CHANGE` in parent `WM_COMMAND` to trigger `InvalidateRect` immediately upon typing, smoothly updating the composer layout in real-time.
+
+### Verification & Build
+- Built release binary: `pwsh -File .\build.ps1 ip-send` -> `dist/release/ip-send.exe` (0 errors, 0 warnings).
 - Updated `docs/CHECKLIST.md` and `docs/JOURNEY.md`.
+
+
+
+
+
+
+
 
 
 

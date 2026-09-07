@@ -48,6 +48,17 @@
 #define MAX_WINDOWS 128
 #define MAX_APPS 64
 
+/* --- Configurable UI Layout Constants --- */
+#define UI_CARD_BASE_WIDTH     210   /* Card width */
+#define UI_CARD_ASPECT_RATIO_W  16   /* Card aspect ratio width (16:10) */
+#define UI_CARD_ASPECT_RATIO_H  10   /* Card aspect ratio height (16:10) */
+#define UI_CARD_GAP             14   /* Gap between cards */
+#define UI_CONTAINER_PADDING    16   /* Padding around center container */
+#define UI_HEADER_HEIGHT        28   /* Top header bar height */
+#define UI_HEADER_TEXT_HEIGHT   18   /* Header title text height */
+#define UI_FONT_SIZE_HINT       12   /* Shortcut hint badge font size */
+#define UI_FONT_SIZE_TITLE      12   /* Window title & header font size */
+
 typedef enum {
     SORT_RECENT,
     SORT_NAME
@@ -631,12 +642,6 @@ static void CleanupThumbnails(void) {
 
 static RECT g_containerRect = {0, 0, 0, 0};
 
-/* --- Layout Metrics Constants --- */
-#define UI_CONTAINER_PADDING  18
-#define UI_HEADER_HEIGHT       34
-#define UI_CARD_GAP            16
-#define UI_HEADER_TEXT_HEIGHT  22
-
 /* --- Filter Matching Helper --- */
 static bool IsItemAppOrHintMatch(const WindowItem *item, const wchar_t *buf, int len) {
     if (len == 0) return true;
@@ -709,6 +714,25 @@ static void GetFilteredIndices(int *outIndices, int *outCount) {
     *outCount = count;
 }
 
+static UINT g_currentDpi = 0;
+
+static void UpdateFontsForDpi(UINT dpi) {
+    if (dpi == 0) dpi = 96;
+    if (g_currentDpi == dpi && g_hFontHint != NULL) return;
+    g_currentDpi = dpi;
+
+    if (g_hFontHint)      DeleteObject(g_hFontHint);
+    if (g_hFontHintLarge) DeleteObject(g_hFontHintLarge);
+    if (g_hFontTitle)     DeleteObject(g_hFontTitle);
+    if (g_hFontGroup)     DeleteObject(g_hFontGroup);
+
+    const wchar_t *uiFace = TinyFont_GetBestUIFace();
+    g_hFontHint      = TinyFont_Create(uiFace, UI_FONT_SIZE_HINT, FW_BOLD, false, dpi);
+    g_hFontHintLarge = TinyFont_Create(uiFace, 16, FW_BOLD, false, dpi);
+    g_hFontTitle     = TinyFont_Create(uiFace, UI_FONT_SIZE_TITLE, FW_NORMAL, false, dpi);
+    g_hFontGroup     = TinyFont_Create(uiFace, UI_FONT_SIZE_TITLE, FW_NORMAL, false, dpi);
+}
+
 /* --- Layout Calculation --- */
 static void ComputeLayout(HWND hwnd, int *outW, int *outH) {
     POINT pt;
@@ -725,6 +749,13 @@ static void ComputeLayout(HWND hwnd, int *outW, int *outH) {
 
     SetWindowPos(hwnd, HWND_TOPMOST, mi.rcMonitor.left, mi.rcMonitor.top, monW, monH, SWP_NOACTIVATE);
 
+    UINT dpi = TinyDPI_GetDpiForMonitor(hMon);
+    if (dpi == 0) dpi = 96;
+    UpdateFontsForDpi(dpi);
+
+    float scale = (float)dpi / 96.0f;
+    if (scale <= 0.0f) scale = 1.0f;
+
     int visibleIndices[MAX_WINDOWS];
     int visibleCount = 0;
     GetFilteredIndices(visibleIndices, &visibleCount);
@@ -738,49 +769,53 @@ static void ComputeLayout(HWND hwnd, int *outW, int *outH) {
 
     int countToLayout = visibleCount > 0 ? visibleCount : 1;
 
+    int cardW = (int)(UI_CARD_BASE_WIDTH * scale);
+    int cardH = (cardW * UI_CARD_ASPECT_RATIO_H) / UI_CARD_ASPECT_RATIO_W;
+    int gap = (int)(UI_CARD_GAP * scale);
+    int headerH = (int)(UI_HEADER_HEIGHT * scale);
+    int headerBarH = (int)(20 * scale);
+    int headerGap = (int)(4 * scale);
+    int padSide = (int)(2 * scale);
+    int padBottom = (int)(2 * scale);
+    int closeW = (int)(18 * scale);
+    int closeH = (int)(18 * scale);
+
     if (g_cfg.layout == LAYOUT_FULL) {
-        int marginX = 24;
-        int marginY = 20;
-        int headerH = UI_HEADER_HEIGHT;
-        int gap = UI_CARD_GAP;
+        int marginX = (int)(20 * scale);
+        int marginY = (int)(16 * scale);
 
         g_containerRect.left = marginX;
         g_containerRect.top = marginY;
         g_containerRect.right = monW - marginX;
         g_containerRect.bottom = monH - marginY;
 
-        int cols = 4;
-        if (countToLayout <= 4) cols = 4;
-        else if (countToLayout <= 8) cols = 4;
-        else if (countToLayout <= 15) cols = 5;
-        else cols = 6;
+        int availW = monW - (marginX * 2);
+        int availH = monH - (marginY * 2) - headerH;
+
+        int cols = (availW + gap) / (cardW + gap);
+        if (cols < 3) cols = 3;
+        if (cols > 8) cols = 8;
 
         int rows = (countToLayout + cols - 1) / cols;
         if (rows < 1) rows = 1;
 
         g_layoutCols = cols;
 
-        int availW = monW - (marginX * 2) - ((cols - 1) * gap);
-        int availH = monH - (marginY * 2) - headerH - ((rows - 1) * gap);
+        cardW = (availW - (cols - 1) * gap) / cols;
+        cardH = (cardW * UI_CARD_ASPECT_RATIO_H) / UI_CARD_ASPECT_RATIO_W;
 
-        /* Calculate card dimensions preserving standard 16:10 aspect ratio */
-        int cardW = availW / cols;
-        int cardH = (cardW * 10) / 16;
-
-        /* If total height of all rows exceeds available height, constrain by height */
         int totalGridH = rows * cardH + (rows - 1) * gap;
         if (totalGridH > availH && rows > 0) {
             cardH = (availH - (rows - 1) * gap) / rows;
-            cardW = (cardH * 16) / 10;
-            if (cardW > availW / cols) {
-                cardW = availW / cols;
+            cardW = (cardH * UI_CARD_ASPECT_RATIO_W) / UI_CARD_ASPECT_RATIO_H;
+            if (cardW > (availW - (cols - 1) * gap) / cols) {
+                cardW = (availW - (cols - 1) * gap) / cols;
             }
         }
 
-        if (cardW < 120) cardW = 120;
-        if (cardH < 80) cardH = 80;
+        if (cardW < (int)(120 * scale)) cardW = (int)(120 * scale);
+        if (cardH < (int)(80 * scale)) cardH = (int)(80 * scale);
 
-        /* In FULL layout, start cards directly below the top header */
         int startY = marginY + headerH;
 
         for (int v = 0; v < visibleCount; v++) {
@@ -796,18 +831,14 @@ static void ComputeLayout(HWND hwnd, int *outW, int *outH) {
             g_items[i].cardRect.right = cx + cardW;
             g_items[i].cardRect.bottom = cy + cardH;
 
-            g_items[i].closeRect.left = cx + cardW - 28;
-            g_items[i].closeRect.top = cy + 5;
-            g_items[i].closeRect.right = cx + cardW - 8;
-            g_items[i].closeRect.bottom = cy + 27;
+            g_items[i].closeRect.left = cx + cardW - closeW - (int)(3 * scale);
+            g_items[i].closeRect.top = cy + (int)(2 * scale);
+            g_items[i].closeRect.right = cx + cardW - (int)(3 * scale);
+            g_items[i].closeRect.bottom = cy + (int)(2 * scale) + closeH;
 
-            int padX = 8;
-            int padTop = 34;
-            int padBottom = 8;
-
-            g_items[i].previewRect.left = cx + padX;
-            g_items[i].previewRect.top = cy + padTop;
-            g_items[i].previewRect.right = cx + cardW - padX;
+            g_items[i].previewRect.left = cx + padSide;
+            g_items[i].previewRect.top = cy + headerBarH + headerGap;
+            g_items[i].previewRect.right = cx + cardW - padSide;
             g_items[i].previewRect.bottom = cy + cardH - padBottom;
             if (g_items[i].previewRect.bottom <= g_items[i].previewRect.top) {
                 g_items[i].previewRect.bottom = g_items[i].previewRect.top + 1;
@@ -815,22 +846,20 @@ static void ComputeLayout(HWND hwnd, int *outW, int *outH) {
         }
     } else {
         /* Centered Grid Container Layout */
+        int padding = (int)(UI_CONTAINER_PADDING * scale);
+
+        int maxCols = (monW - padding * 2 + gap) / (cardW + gap);
+        if (maxCols < 1) maxCols = 1;
+        if (maxCols > 6) maxCols = 6;
+
         int cols = 5;
-        if (countToLayout <= 5) cols = countToLayout > 0 ? countToLayout : 1;
-        else if (countToLayout <= 10) cols = 5;
-        else if (countToLayout <= 15) cols = 5;
-        else cols = 6;
+        if (countToLayout <= maxCols) cols = countToLayout > 0 ? countToLayout : 1;
+        else cols = maxCols;
 
         int rows = (countToLayout + cols - 1) / cols;
         if (rows < 1) rows = 1;
 
         g_layoutCols = cols;
-
-        int cardW = 240;
-        int cardH = 160;
-        int gap = UI_CARD_GAP;
-        int padding = UI_CONTAINER_PADDING;
-        int headerH = UI_HEADER_HEIGHT;
 
         int gridW = cols * cardW + (cols - 1) * gap;
         int gridH = rows * cardH + (rows - 1) * gap;
@@ -838,8 +867,25 @@ static void ComputeLayout(HWND hwnd, int *outW, int *outH) {
         int containerW = gridW + padding * 2;
         int containerH = gridH + padding * 2 + headerH;
 
-        if (containerW > monW * 92 / 100) containerW = monW * 92 / 100;
-        if (containerH > monH * 90 / 100) containerH = monH * 90 / 100;
+        int maxContW = monW * 94 / 100;
+        int maxContH = monH * 92 / 100;
+
+        if (containerW > maxContW && cols > 0) {
+            containerW = maxContW;
+            int availGridW = containerW - padding * 2;
+            cardW = (availGridW - (cols - 1) * gap) / cols;
+            cardH = (cardW * UI_CARD_ASPECT_RATIO_H) / UI_CARD_ASPECT_RATIO_W;
+            gridW = cols * cardW + (cols - 1) * gap;
+            gridH = rows * cardH + (rows - 1) * gap;
+            containerH = gridH + padding * 2 + headerH;
+        }
+
+        if (containerH > maxContH && rows > 0) {
+            containerH = maxContH;
+            int availGridH = containerH - padding * 2 - headerH;
+            cardH = (availGridH - (rows - 1) * gap) / rows;
+            cardW = (cardH * UI_CARD_ASPECT_RATIO_W) / UI_CARD_ASPECT_RATIO_H;
+        }
 
         int containerX = (monW - containerW) / 2;
         int containerY = (monH - containerH) / 2;
@@ -862,10 +908,13 @@ static void ComputeLayout(HWND hwnd, int *outW, int *outH) {
             g_items[i].cardRect.right = cx + cardW;
             g_items[i].cardRect.bottom = cy + cardH;
 
-            g_items[i].previewRect.left = cx + 8;
-            g_items[i].previewRect.top = cy + 34;
-            g_items[i].previewRect.right = cx + cardW - 8;
-            g_items[i].previewRect.bottom = cy + cardH - 8;
+            g_items[i].previewRect.left = cx + padSide;
+            g_items[i].previewRect.top = cy + headerBarH + headerGap;
+            g_items[i].previewRect.right = cx + cardW - padSide;
+            g_items[i].previewRect.bottom = cy + cardH - padBottom;
+            if (g_items[i].previewRect.bottom <= g_items[i].previewRect.top) {
+                g_items[i].previewRect.bottom = g_items[i].previewRect.top + 1;
+            }
         }
     }
 }
@@ -913,7 +962,7 @@ static void PaintOverlay(HWND hwnd, HDC hdc) {
 
     SetBkMode(memDC, TRANSPARENT);
     HFONT hOldFont = (HFONT)SelectObject(memDC, g_hFontGroup);
-    SetTextColor(memDC, RGB(180, 190, 205));
+    SetTextColor(memDC, RGB(165, 175, 190));
 
     wchar_t headerText[256];
     if (g_typedLen > 0) {
@@ -929,10 +978,17 @@ static void PaintOverlay(HWND hwnd, HDC hdc) {
         swprintf_s(headerText, 256, L"Window Switcher  |  Layout: %s  |  Sort: %s  |  BG: %s", layoutName, sortName, bgName);
     }
 
-    int headerLeft = (g_cfg.layout == LAYOUT_CENTER) ? (g_containerRect.left + UI_CONTAINER_PADDING) : g_containerRect.left;
-    int headerTop  = (g_cfg.layout == LAYOUT_CENTER) ? (g_containerRect.top + UI_CONTAINER_PADDING - 2) : g_containerRect.top;
-    RECT headerRect = { headerLeft, headerTop, g_containerRect.right - UI_CONTAINER_PADDING, headerTop + UI_HEADER_TEXT_HEIGHT };
+    float scale = (float)g_currentDpi / 96.0f;
+    if (scale <= 0.0f) scale = 1.0f;
+    int padding = (int)(UI_CONTAINER_PADDING * scale);
+    int headerLeft = (g_cfg.layout == LAYOUT_CENTER) ? (g_containerRect.left + padding) : g_containerRect.left;
+    int headerTop  = (g_cfg.layout == LAYOUT_CENTER) ? (g_containerRect.top + padding) : g_containerRect.top;
+    RECT headerRect = { headerLeft, headerTop, g_containerRect.right - (g_cfg.layout == LAYOUT_CENTER ? padding : 0), headerTop + (int)(UI_HEADER_TEXT_HEIGHT * scale) };
     DrawTextW(memDC, headerText, -1, &headerRect, DT_SINGLELINE | DT_VCENTER | DT_LEFT);
+
+    int padTop = (int)(2 * scale);
+    int headerBarH = (int)(20 * scale);
+    int closeW = (int)(18 * scale);
 
     /* Render visible matching cards */
     for (int v = 0; v < visibleCount; v++) {
@@ -945,14 +1001,14 @@ static void PaintOverlay(HWND hwnd, HDC hdc) {
         bool isCloseHovered = (v == g_hoverCloseIndex);
         bool showClose = (isSelected || isHovered || isCloseHovered);
 
-        COLORREF cardBg = isSelected ? RGB(38, 44, 56) : (isHovered ? RGB(32, 36, 45) : RGB(18, 20, 26));
-        COLORREF cardBorder = isSelected ? RGB(0, 150, 255) : (isHovered ? RGB(80, 120, 170) : RGB(45, 48, 58));
+        COLORREF cardBg = isSelected ? RGB(32, 38, 48) : (isHovered ? RGB(26, 30, 38) : RGB(16, 18, 23));
+        COLORREF cardBorder = isSelected ? RGB(0, 140, 255) : (isHovered ? RGB(70, 105, 150) : RGB(40, 44, 52));
 
         HBRUSH cBrush = CreateSolidBrush(cardBg);
-        HPEN cPen = CreatePen(PS_SOLID, isSelected ? 2 : 1, cardBorder);
+        HPEN cPen = CreatePen(PS_SOLID, isSelected ? (int)(2 * scale) : 1, cardBorder);
         SelectObject(memDC, cBrush);
         SelectObject(memDC, cPen);
-        RoundRect(memDC, r.left, r.top, r.right, r.bottom, 10, 10);
+        RoundRect(memDC, r.left, r.top, r.right, r.bottom, (int)(8 * scale), (int)(8 * scale));
         DeleteObject(cBrush);
         DeleteObject(cPen);
 
@@ -960,42 +1016,43 @@ static void PaintOverlay(HWND hwnd, HDC hdc) {
         SelectObject(memDC, g_hFontHint);
         SIZE textSize;
         GetTextExtentPoint32W(memDC, item->hint, (int)wcslen(item->hint), &textSize);
-        int badgeW = textSize.cx + 14;
-        if (badgeW < 26) badgeW = 26;
+        int badgeW = textSize.cx + (int)(8 * scale);
+        int minBadgeW = (int)(18 * scale);
+        if (badgeW < minBadgeW) badgeW = minBadgeW;
 
         RECT badgeRect;
         if (showClose) {
             /* Close button visible: place cross at far right, hint badge to its left */
-            item->closeRect.left = r.right - 24;
-            item->closeRect.top = r.top + 5;
-            item->closeRect.right = r.right - 6;
-            item->closeRect.bottom = r.top + 27;
+            item->closeRect.left = r.right - closeW - (int)(3 * scale);
+            item->closeRect.top = r.top + padTop;
+            item->closeRect.right = r.right - (int)(3 * scale);
+            item->closeRect.bottom = r.top + padTop + headerBarH;
 
             COLORREF closeColor = isCloseHovered ? RGB(255, 95, 95) : RGB(225, 65, 65);
             SelectObject(memDC, g_hFontHint);
             SetTextColor(memDC, closeColor);
             DrawTextW(memDC, L"✕", -1, &item->closeRect, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
 
-            int badgeRight = item->closeRect.left - 4;
+            int badgeRight = item->closeRect.left - (int)(2 * scale);
             badgeRect.left = badgeRight - badgeW;
-            badgeRect.top = r.top + 6;
+            badgeRect.top = r.top + padTop;
             badgeRect.right = badgeRight;
-            badgeRect.bottom = r.top + 28;
+            badgeRect.bottom = r.top + padTop + headerBarH;
         } else {
-            /* Close button hidden: hint badge sits flush at right edge with NO empty space */
+            /* Close button hidden: hint badge sits flush at right edge with trimmed padding */
             SetRectEmpty(&item->closeRect);
-            badgeRect.left = r.right - 10 - badgeW;
-            badgeRect.top = r.top + 6;
-            badgeRect.right = r.right - 10;
-            badgeRect.bottom = r.top + 28;
+            badgeRect.left = r.right - (int)(3 * scale) - badgeW;
+            badgeRect.top = r.top + padTop;
+            badgeRect.right = r.right - (int)(3 * scale);
+            badgeRect.bottom = r.top + padTop + headerBarH;
         }
 
         /* Render Shortcut Hint Badge */
-        COLORREF badgeBg = isSelected ? RGB(0, 120, 240) : (isHovered ? RGB(35, 85, 155) : RGB(48, 64, 90));
+        COLORREF badgeBg = isSelected ? RGB(0, 120, 240) : (isHovered ? RGB(35, 85, 155) : RGB(44, 58, 80));
         HBRUSH badgeBrush = CreateSolidBrush(badgeBg);
         SelectObject(memDC, badgeBrush);
         SelectObject(memDC, GetStockObject(NULL_PEN));
-        RoundRect(memDC, badgeRect.left, badgeRect.top, badgeRect.right, badgeRect.bottom, 6, 6);
+        RoundRect(memDC, badgeRect.left, badgeRect.top, badgeRect.right, badgeRect.bottom, (int)(4 * scale), (int)(4 * scale));
         DeleteObject(badgeBrush);
 
         SetTextColor(memDC, RGB(255, 255, 255));
@@ -1003,8 +1060,8 @@ static void PaintOverlay(HWND hwnd, HDC hdc) {
         DrawTextW(memDC, item->hint, -1, &badgeRect, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
 
         /* App Name and Window Title */
-        SelectObject(memDC, g_hFontGroup);
-        SetTextColor(memDC, isSelected ? RGB(230, 240, 255) : RGB(170, 180, 195));
+        SelectObject(memDC, g_hFontTitle);
+        SetTextColor(memDC, isSelected ? RGB(235, 242, 255) : RGB(175, 185, 198));
 
         wchar_t appTitleBuf[384];
         if (wcslen(item->title) > 0 && _wcsicmp(item->appName, item->title) != 0) {
@@ -1013,17 +1070,52 @@ static void PaintOverlay(HWND hwnd, HDC hdc) {
             swprintf_s(appTitleBuf, 384, L"%s", item->appName);
         }
 
-        RECT appHeaderRect = { r.left + 10, r.top + 5, badgeRect.left - 8, r.top + 29 };
+        RECT appHeaderRect = { r.left + (int)(5 * scale), r.top + padTop, badgeRect.left - (int)(4 * scale), r.top + padTop + headerBarH };
         DrawTextW(memDC, appTitleBuf, -1, &appHeaderRect, DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_END_ELLIPSIS);
 
         if (!item->hThumbnail) {
             DwmRegisterThumbnail(hwnd, item->hwnd, &item->hThumbnail);
         }
         if (item->hThumbnail) {
+            SIZE srcSize = { 0, 0 };
+            RECT destRect = item->previewRect;
+
+            if (FAILED(DwmQueryThumbnailSourceSize(item->hThumbnail, &srcSize)) || srcSize.cx <= 0 || srcSize.cy <= 0) {
+                RECT rcWin = {0};
+                if (GetWindowRect(item->hwnd, &rcWin)) {
+                    srcSize.cx = rcWin.right - rcWin.left;
+                    srcSize.cy = rcWin.bottom - rcWin.top;
+                }
+            }
+
+            if (srcSize.cx > 0 && srcSize.cy > 0) {
+                int destW = item->previewRect.right - item->previewRect.left;
+                int destH = item->previewRect.bottom - item->previewRect.top;
+
+                int fitW = destW;
+                int fitH = (fitW * srcSize.cy) / srcSize.cx;
+
+                if (fitH > destH) {
+                    fitH = destH;
+                    fitW = (fitH * srcSize.cx) / srcSize.cy;
+                }
+
+                if (fitW < 1) fitW = 1;
+                if (fitH < 1) fitH = 1;
+
+                int offsetX = item->previewRect.left + (destW - fitW) / 2;
+                int offsetY = item->previewRect.top + (destH - fitH) / 2;
+
+                destRect.left = offsetX;
+                destRect.top = offsetY;
+                destRect.right = offsetX + fitW;
+                destRect.bottom = offsetY + fitH;
+            }
+
             DWM_THUMBNAIL_PROPERTIES props;
             ZeroMemory(&props, sizeof(props));
             props.dwFlags = DWM_TNS_RECTDESTINATION | DWM_TNS_VISIBLE | DWM_TNS_OPACITY;
-            props.rcDestination = item->previewRect;
+            props.rcDestination = destRect;
             props.fVisible = TRUE;
             props.opacity = 255;
             DwmUpdateThumbnailProperties(item->hThumbnail, &props);
@@ -1290,11 +1382,17 @@ static LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
     case WM_CREATE:
         g_startTime        = GetTickCount64();
         g_hasBeenActivated = false;
-        g_hFontHint        = TinyGUI_CreateScaledFont(15, FW_BOLD, TinyFont_GetBestUIFace());
-        g_hFontHintLarge   = TinyGUI_CreateScaledFont(24, FW_BOLD, TinyFont_GetBestUIFace());
-        g_hFontTitle       = TinyGUI_CreateScaledFont(13, FW_NORMAL, TinyFont_GetBestUIFace());
-        g_hFontGroup       = TinyGUI_CreateScaledFont(13, FW_SEMIBOLD, TinyFont_GetBestUIFace());
+        UpdateFontsForDpi(96);
         return 0;
+
+    case WM_DPICHANGED: {
+        UINT newDpi = LOWORD(wParam);
+        UpdateFontsForDpi(newDpi);
+        int w = 0, h = 0;
+        ComputeLayout(hwnd, &w, &h);
+        InvalidateRect(hwnd, NULL, FALSE);
+        return 0;
+    }
 
     case WM_ERASEBKGND:
         return 1;

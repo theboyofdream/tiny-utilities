@@ -66,14 +66,13 @@ ip-send.exe [--context-menu register|unregister|true|false]
 | :--- | :--- |
 | `↑` / `↓` | Navigate recipient search results |
 | `Space` | Toggle `[x]` / `[ ]` selection for highlighted recipient |
-| `Enter` | Trigger Send action (`ExecuteSend`) when in search mode; inserts a newline in message edit mode |
+| `Enter` | Trigger Send action (`ExecuteSend`) |
 | `Ctrl + O` | Open File selection dialog |
-| `Ctrl + V` | Paste copied files or text |
-| `Insert` | Enter message edit mode (allowing names with 'i' like 'iris' to be searched cleanly) |
+| `Ctrl + V` | Paste copied files or text (or paste into edit box when editing) |
+| `Insert` | Enter / Exit message edit mode (focuses normal native multiline text box) |
 | `r` | Refresh online recipient list via `ipcmd.exe list /all` (when not in message mode) |
 | `/` | Show clean shortcut hints popup dialog without icon (when not in message mode) |
-| `Tab` | Switch between search mode and message edit mode |
-| `Esc` | Exit message insert mode (or close composer window) |
+| `Esc` | Exit message edit mode (or close composer window) |
 
 ---
 
@@ -86,16 +85,16 @@ ip-send.exe [--context-menu register|unregister|true|false]
 - **Error Handling**: If IP Messenger is not detected on the system when attempting to send, a dialog and TUI status error are thrown:
   `For this utility to work, IP Messenger (ipcmd.exe / ipmsg.exe) needs to be installed on your system.`
 - **Backend Dispatch**: Calls `<detected_ipcmd_path> send /to:<recipients> [/msg:"<message>"] "<file1>" "<file2>" ...`.
-- **IPC Contract**: `Global\TinyIPMsgMutex` and `Global\TinyIPMsgEvent`. Double-launch signals running instance and exits cleanly.
+- **IPC Contract**: `Global\TinyIPSendMutex` and `Global\TinyIPSendEvent`. Double-launch signals running instance and exits cleanly.
 
 ---
 
 ## 6. Build Instructions
 
 ```powershell
-pwsh -File .\build.ps1 ipmsg
+pwsh -File .\build.ps1 ip-send
 ```
 
 Output executables:
-- `dist/release/ipmsg.exe`
-- `dist/debug/ipmsg.exe`
+- `dist/release/ip-send.exe`
+- `dist/debug/ip-send.exe`

@@ -62,15 +62,22 @@ window-switcher.exe [options]
 ### Card Container Layout
 - **Full Screen Coverage**: Full-screen backdrop fill (Blur / Tint) covers the entire active display monitor (`MonitorFromPoint` / `GetMonitorInfoW`). Cards float directly on the backdrop without nested outer container box borders.
 - **Container Header Bar**: Aligned precisely to card grid margins (`g_containerRect.left`). Displays search filter status or active switcher config parameters.
-- **Card Header Bar** (`r.top + 5` to `r.top + 29`):
+- **Card Header Bar** (`r.top + 2` to `r.top + 20`):
   - **Left Side**: `App Name — Window Title` rendered with `common/font.h` UI font (`TinyFont_GetBestUIFace()`) and smooth ellipsis truncation (`DT_END_ELLIPSIS`).
-  - **Right Side**: Borderless shortcut hint badge (`[ F ]`, `[ N+ ]`, `[ C1 ]`) in standard-size bold font (`g_hFontHint` 15pt bold) with crisp white text (`RGB(255, 255, 255)`) and a distinct accent background color:
+  - **Right Side**: Borderless shortcut hint badge (`[ F ]`, `[ N+ ]`, `[ C1 ]`) and hover close cross (`✕`) with crisp white text (`RGB(255, 255, 255)`):
     - **Selected**: `RGB(0, 120, 240)` (vibrant cyan-blue fill).
     - **Hovered**: `RGB(35, 85, 155)` (distinct indigo fill).
-    - **Normal**: `RGB(48, 64, 90)` (distinct rich deep slate blue fill).
-- **Card Body / Live Preview Area** (`previewRect`: `r.top + 34` to `r.bottom - 8`):
+    - **Normal**: `RGB(44, 58, 80)` (distinct rich slate blue fill).
+- **Card Body / Live Preview Area** (`previewRect`: `r.left + 2`, `r.top + 25` to `r.right - 2`, `r.bottom - 2`):
   - DWM Hardware-Accelerated Live Window Preview Thumbnail (`DwmRegisterThumbnail` + `DwmUpdateThumbnailProperties`).
-  - Because the hint badge and title text sit strictly *above* `previewRect`, DWM live thumbnail compositing can **never** cover or obscure hint badges or window titles.
+  - **Aspect-Ratio-Preserving Fit**: Queries real source window dimensions via `DwmQueryThumbnailSourceSize()` (with `GetWindowRect` fallback). Dynamically fits and centers the thumbnail inside `previewRect` without non-uniform stretching, preserving natural window proportions (portrait terminals, 16:9, ultrawide 21:9) with dark letterboxing.
+  - Slim 2-3px interior margins and 5px vertical separation below the header bar ensure maximum thumbnail visibility without wasted space.
+
+### Unified Proportional Physical Scaling Architecture
+- **Per-Monitor Physical Sizing**: Queries display DPI via `TinyDPI_GetDpiForMonitor(hMon)` to compute the display scale factor `scale = dpi / 96.0f`.
+- **Proportional Font & Card Parity**: Both typography (`UI_FONT_SIZE_HINT`, `UI_FONT_SIZE_TITLE`) and layout dimensions (`UI_CARD_BASE_WIDTH`, gaps, paddings, header heights, badges) scale synchronously with display DPI. This guarantees text and card boundaries maintain the exact same real-world physical size and visual proportions between high-DPI laptop displays and desktop monitors.
+- **Top-Level Constants**: Base 96-DPI constants (`UI_CARD_BASE_WIDTH`, `UI_CARD_ASPECT_RATIO_W`/`H`, `UI_CARD_GAP`, `UI_CONTAINER_PADDING`, `UI_HEADER_HEIGHT`, `UI_FONT_SIZE_HINT`, `UI_FONT_SIZE_TITLE`) are declared directly at the top of `src/window-switcher.c` for quick tuning.
+- **Dynamic Columns in Full Layout (`--layout full`)**: Column count is computed dynamically based on target physical card width (`availW / (targetCardW + gap)`), capping large desktop monitors (2560x1440, 4K) to 6–8 columns. Prevents cards from stretching into massive 600px+ pillars on large monitors while keeping cards at their exact configured physical dimensions.
 
 ### Robust Single-Window Architecture
 - Single top-level topmost window (`g_hwndOverlay`) with GDI double-buffered rendering (`BitBlt`).
