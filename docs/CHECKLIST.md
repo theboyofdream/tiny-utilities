@@ -278,7 +278,7 @@ Legend: `[x]` done & verified, `[ ]` known gap, `[-]` not applicable.
   - Fixed Send button visibility when multiple recipients are selected by constraining `To:` summary rendering with `DT_END_ELLIPSIS` and giving `Send` a dedicated styled button rect.
   - Eliminated window height "flinch back" on resize by removing redundant `SetWindowPos` from `RenderTUIWindow`, dynamically calculating visible list rows from available vertical space, adding `WM_GETMINMAXINFO` (min 360x260), `WM_MOUSEWHEEL` scrolling, and row click selection.
   - Added offline recipient selection guard: prevented spacebar and click selection of offline users (`!r->active`), kept clean dim appearance without extra label clutter, and added auto-dismissing toast-style warning messages (cleared via 3s timer).
-- [x] Tiny Window Switcher (`src/window-switcher.c`, `docs/window-switcher.md` — updated 2026-09-07):
+- [x] Tiny Window Switcher (`src/window-switcher.c`, `docs/window-switcher.md` — updated 2026-09-08):
   - Created native Win32/DWM keyboard-driven window switcher utility.
   - Real UWP / Store App & Process Metadata Resolution: resolves actual application name via `GetExeMetadataName` (`FileDescription` / `ProductName` from Win32 `GetFileVersionInfoW` / `VerQueryValueW`) and `GetUWPRealProcessId` (child `Windows.UI.Core.CoreWindow` PID query + title parsing for `ApplicationFrameHost.exe` host process), accurately distinguishing Chromium/Electron apps (e.g. `Helium -> H`, `Calculator -> C`, `Clock -> CL`).
   - Top header text baseline alignment precisely matching grid container margins (`gridLeft`), resolving `LAYOUT_FULL` alignment offset.
@@ -287,7 +287,7 @@ Legend: `[x]` done & verified, `[ ]` known gap, `[-]` not applicable.
   - Default sort order set to `name` (`SORT_NAME`); grouping logic (`--group`), `dim`, and `none` background modes removed (`bgMode` supports `blur` or `tint`).
   - Transparent Tint & Acrylic Blur: replaced legacy tint opacity with hexadecimal `--tint-color #RRGGBBAA` parsing (`ParseHexColorWithAlpha`), supporting values like `#00000005` or `#FFFFFF50` for true translucent GDI tinting; `--blur` (1..100) maps 1..30 to Aero light glass blur and 31..100 to Acrylic frosted blur.
   - Centered Grid Container Layout (`--layout center` default, floating cards directly on screen backdrop without outer container box/border), or `--layout full` (100% display edge-to-edge expansion with status header text aligned precisely to column 0 left boundary). Unified proportional physical scaling (configurable at the top of `src/window-switcher.c` via `UI_CARD_BASE_WIDTH`, `UI_CARD_ASPECT_RATIO_W`/`H`, `UI_CARD_GAP`, `UI_CONTAINER_PADDING`, `UI_HEADER_HEIGHT`, `UI_FONT_SIZE_HINT`, `UI_FONT_SIZE_TITLE`) scales typography and card dimensions synchronously across display DPIs (`scale = dpi / 96.0f`), guaranteeing identical physical size and proportions between high-DPI laptop displays and desktop monitors, while dynamic column calculation in `--layout full` caps columns (3–8) so cards maintain target physical sizing without stretching on large monitors.
-  - Robust single-window rendering architecture (`g_hwndOverlay`), reusing `font.h` header functions (`TinyFont_GetBestUIFace`), positioning the borderless standard-size shortcut hint badge (`g_hFontHint` 15pt bold) on the RIGHT side of card headers, followed by an on-hover / on-focus red cross close icon (`✕`) with no background, allowing instant graceful window closing (`WM_CLOSE`) or `Shift + Click` force termination (`TerminateProcess` / `EndTask` to bypass unsaved modal prompts) without exiting the switcher, dynamically refreshing remaining cards and hints. Live DWM window thumbnails dynamically query source window aspect ratio (`DwmQueryThumbnailSourceSize`) to fit and center without stretching or distorting portrait, ultrawide, or non-16:10 windows.
+  - Robust single-window rendering architecture (`g_hwndOverlay`), reusing `font.h` header functions (`TinyFont_GetBestUIFace`), positioning the borderless standard-size shortcut hint badge (`g_hFontHint` 15pt bold) on the RIGHT side of card headers, followed by an on-hover / on-focus red cross close icon (`✕`) with no background, allowing instant graceful window closing (`WM_CLOSE`) or `Shift + Click` force termination (`TerminateProcess` / `EndTask`) while keeping the switcher overlay open, dynamically refreshing remaining cards, hints, and thumbnails, with foreground deactivation protection (`g_lastCloseTime`).
   - Verified `pwsh -File .\build.ps1 window-switcher` compiles cleanly in release and debug modes with zero errors. Smoke tested double-launch IPC toggle contract.
 
 ## 25. MOUSE SPOTLIGHT TOOL (`src/mouse-spotlight.c` -> `mouse-spotlight.exe` — updated 2026-09-07)
@@ -309,6 +309,21 @@ Legend: `[x]` done & verified, `[ ]` known gap, `[-]` not applicable.
   - Dedicates the `<Insert>` key (and mouse clicking the message area) exclusively for entering/exiting message edit mode, removing `<Tab>` from toggling into the message box.
   - Seamlessly styled child edit control matching dark/light themes via `WM_CTLCOLOREDIT` with matching background and text colors.
   - Synchronizes typed message buffer on change, focus loss, and send dispatch.
+- [x] IP Send Recipient Selection Preservation Across Refreshes (`src/ip-send.c` — updated 2026-09-11):
+  - Preserves selected checks (`selected == true`) across live recipient refreshes (`r` key or `RefreshRecipientList`) by introducing `AreRecipientsEqual` matching by UID, Name/Hostname, and IP.
+  - Parses incoming `ipcmd list /all` output into a temporary buffer (`s_tempRecipients`) before committing, safely retaining checked status for existing users and preserving selected custom/CLI recipients.
+  - Stabilizes active cursor highlighting (`highlightedFilteredIdx` and `scrollOffset`) across list refreshes so cursor focus does not jump to a different user.
+  - Updated selection toggling in both mouse click (`WM_LBUTTONDOWN`) and keyboard (`VK_SPACE`): users can always deselect an already selected contact even if their active status changes to offline.
+- [x] Pin to Top Interactive Window Selection & IPC Lifecycle Fixes (`src/pin-to-top.c` — updated 2026-09-11):
+  - Fixed premature process termination bug: removed `PostQuitMessage(0)` on picker overlay destruction (`WM_DESTROY`), resolving the issue where selecting any window immediately caused `WinMain` to receive `WM_QUIT`, unpin the window, destroy its border overlay, and terminate in 16 ms.
+  - Migrated IPC single-instance toggle mechanism strictly to `tiny_ipc.h` (`TinyIPC_AcquireOrToggle`), eliminating manual mutex creation and invalid `ReleaseMutex` calls on unowned mutexes.
+  - Refactored CLI argument parsing to declarative `TinyCLI_ParseCommandLine` (`tiny_cli.h`) with fallback support for `--key=val` formats.
+  - Added cloaked window filtering (`DWMWA_CLOAKED`) and tool window filtering (`WS_EX_TOOLWINDOW`) to avoid selecting invisible/suspended background UWP windows or utility overlays.
+  - Added FIFO replacement when pinning past `maxWindows` limit: unpins oldest pinned window so users can pin a new window without manually unpinning first.
+  - Automatically terminates tracking loop and cleans up process when all pinned windows are destroyed by the user.
+  - Added `CS_HREDRAW | CS_VREDRAW` and explicit repaint invalidation to border overlay window class so resized windows maintain clean, artifact-free borders.
+  - Centered interactive picker prompt dynamically on active monitor containing cursor.
+  - Verified `pwsh -File .\build.ps1 pin-to-top` compiles cleanly in release and debug modes with 0 errors/warnings and verified double-launch toggle IPC pattern.
 
 ## Open items / notes
 - CPU idle % not re-measured; loop is event-wait based (sleeps 16 ms) so expected < 0.2%.

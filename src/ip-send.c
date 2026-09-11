@@ -188,6 +188,49 @@ static void FilterRecipients(void) {
     }
 }
 
+static RecipientItem s_tempRecipients[MAX_RECIPIENTS];
+
+// Compare two recipients to check if they refer to the same user
+static bool AreRecipientsEqual(const RecipientItem* a, const RecipientItem* b) {
+    if (!a || !b) return false;
+
+    // Match by non-empty UID (IPMsg UID or <hash> is unique across sessions)
+    if (a->uid[0] != L'\0' && b->uid[0] != L'\0') {
+        if (_wcsicmp(a->uid, b->uid) == 0) return true;
+        return false;
+    }
+
+    // Match by name
+    if (_wcsicmp(a->name, b->name) == 0) {
+        if (a->hostName[0] != L'\0' && b->hostName[0] != L'\0' &&
+            wcscmp(a->hostName, L"-") != 0 && wcscmp(b->hostName, L"-") != 0 &&
+            wcscmp(a->hostName, L"Custom") != 0 && wcscmp(b->hostName, L"Custom") != 0) {
+            return (_wcsicmp(a->hostName, b->hostName) == 0);
+        }
+        return true;
+    }
+
+    // Match by IP address if both have valid IPs
+    if (a->ipAddr[0] != L'\0' && b->ipAddr[0] != L'\0' &&
+        wcscmp(a->ipAddr, L"-") != 0 && wcscmp(b->ipAddr, L"-") != 0) {
+        if (_wcsicmp(a->ipAddr, b->ipAddr) == 0) {
+            if (_wcsicmp(a->name, b->name) == 0 || _wcsicmp(a->name, b->ipAddr) == 0 || _wcsicmp(b->name, a->ipAddr) == 0) {
+                return true;
+            }
+        }
+    }
+
+    // Match if name was an IP address matching b's IP address
+    if (b->ipAddr[0] != L'\0' && wcscmp(b->ipAddr, L"-") != 0 && _wcsicmp(a->name, b->ipAddr) == 0) {
+        return true;
+    }
+    if (a->ipAddr[0] != L'\0' && wcscmp(a->ipAddr, L"-") != 0 && _wcsicmp(b->name, a->ipAddr) == 0) {
+        return true;
+    }
+
+    return false;
+}
+
 // Forward declaration
 static bool QueryLiveIPMsgRecipients(const wchar_t* ipcmdPath);
 
@@ -199,10 +242,43 @@ static void RefreshRecipientList(HWND hWnd) {
         UpdateWindow(hWnd);
     }
 
+    RecipientItem highlightedRecipient = { 0 };
+    bool hasHighlighted = false;
+    if (g_state.filteredCount > 0 && g_state.highlightedFilteredIdx >= 0 &&
+        g_state.highlightedFilteredIdx < g_state.filteredCount) {
+        int oldRIdx = g_state.filteredIndices[g_state.highlightedFilteredIdx];
+        if (oldRIdx >= 0 && oldRIdx < g_state.recipientCount) {
+            highlightedRecipient = g_state.recipients[oldRIdx];
+            hasHighlighted = true;
+        }
+    }
+
     wchar_t ipcmdPath[MAX_PATH];
     if (FindIPMsgExecutable(ipcmdPath, MAX_PATH)) {
         QueryLiveIPMsgRecipients(ipcmdPath);
         FilterRecipients();
+        if (hasHighlighted) {
+            for (int i = 0; i < g_state.filteredCount; i++) {
+                int rIdx = g_state.filteredIndices[i];
+                if (AreRecipientsEqual(&g_state.recipients[rIdx], &highlightedRecipient)) {
+                    g_state.highlightedFilteredIdx = i;
+                    break;
+                }
+            }
+            int visRows = g_state.visibleRows > 0 ? g_state.visibleRows : 4;
+            if (g_state.highlightedFilteredIdx < g_state.scrollOffset) {
+                g_state.scrollOffset = g_state.highlightedFilteredIdx;
+            }
+            if (g_state.highlightedFilteredIdx >= g_state.scrollOffset + visRows) {
+                g_state.scrollOffset = g_state.highlightedFilteredIdx - visRows + 1;
+            }
+            if (g_state.scrollOffset > g_state.filteredCount - visRows) {
+                g_state.scrollOffset = g_state.filteredCount - visRows;
+            }
+            if (g_state.scrollOffset < 0) {
+                g_state.scrollOffset = 0;
+            }
+        }
     }
 
     g_state.isRefreshing = false;
@@ -251,6 +327,8 @@ static bool QueryLiveIPMsgRecipients(const wchar_t* ipcmdPath) {
     CloseHandle(pi.hProcess);
 
     if (totalRead == 0) return false;
+
+    memset(s_tempRecipients, 0, sizeof(s_tempRecipients));
 
     // Parse output lines into recipient names
     char* context = NULL;
@@ -319,19 +397,45 @@ static bool QueryLiveIPMsgRecipients(const wchar_t* ipcmdPath) {
                 if (ipBuf[0] != '\0') MultiByteToWideChar(CP_ACP, 0, ipBuf, -1, wIP, 64);
                 if (uidBuf[0] != '\0') MultiByteToWideChar(CP_ACP, 0, uidBuf, -1, wUid, 128);
 
-                wcscpy_s(g_state.recipients[count].name, 128, wName);
-                wcscpy_s(g_state.recipients[count].hostName, 128, wHost);
-                wcscpy_s(g_state.recipients[count].ipAddr, 64, wIP[0] ? wIP : L"-");
-                wcscpy_s(g_state.recipients[count].uid, 128, wUid);
-                g_state.recipients[count].active = isActive;
-                g_state.recipients[count].selected = false;
+                wcscpy_s(s_tempRecipients[count].name, 128, wName);
+                wcscpy_s(s_tempRecipients[count].hostName, 128, wHost);
+                wcscpy_s(s_tempRecipients[count].ipAddr, 64, wIP[0] ? wIP : L"-");
+                wcscpy_s(s_tempRecipients[count].uid, 128, wUid);
+                s_tempRecipients[count].active = isActive;
+                s_tempRecipients[count].selected = false;
                 count++;
             }
         }
         line = strtok_s(NULL, "\r\n", &context);
     }
 
-    if (count > 0) {
+    if (count > 0 || totalRead > 0) {
+        // Preserve selection state from existing recipients
+        bool oldMatched[MAX_RECIPIENTS] = { 0 };
+
+        for (int i = 0; i < count; i++) {
+            for (int j = 0; j < g_state.recipientCount; j++) {
+                if (!oldMatched[j] && AreRecipientsEqual(&g_state.recipients[j], &s_tempRecipients[i])) {
+                    s_tempRecipients[i].selected = g_state.recipients[j].selected;
+                    oldMatched[j] = true;
+                    break;
+                }
+            }
+        }
+
+        // Preserve any previously selected recipients not returned in the new query
+        // (e.g. custom recipients added via CLI or temporarily unlisted contacts)
+        for (int j = 0; j < g_state.recipientCount && count < MAX_RECIPIENTS; j++) {
+            if (!oldMatched[j] && g_state.recipients[j].selected) {
+                s_tempRecipients[count] = g_state.recipients[j];
+                count++;
+            }
+        }
+
+        // Commit updated recipient list
+        for (int i = 0; i < count; i++) {
+            g_state.recipients[i] = s_tempRecipients[i];
+        }
         g_state.recipientCount = count;
         return true;
     }
@@ -1438,8 +1542,11 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
             int itemIdx = g_state.scrollOffset + rowIdx;
             if (itemIdx >= 0 && itemIdx < g_state.filteredCount) {
                 int rIdx = g_state.filteredIndices[itemIdx];
-                if (g_state.recipients[rIdx].active) {
-                    g_state.recipients[rIdx].selected = !g_state.recipients[rIdx].selected;
+                if (g_state.recipients[rIdx].selected) {
+                    g_state.recipients[rIdx].selected = false;
+                    InvalidateRect(hWnd, NULL, FALSE);
+                } else if (g_state.recipients[rIdx].active) {
+                    g_state.recipients[rIdx].selected = true;
                     InvalidateRect(hWnd, NULL, FALSE);
                 } else {
                     wchar_t warnBuf[256];
@@ -1476,6 +1583,29 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
                         }
                     } else if ((_wcsicmp(argv[i], L"--to") == 0 || _wcsicmp(argv[i], L"-t") == 0) && i + 1 < argc) {
                         i++;
+                        wchar_t toBuf[256];
+                        wcscpy_s(toBuf, 256, argv[i]);
+                        wchar_t* nextToken = NULL;
+                        wchar_t* token = wcstok_s(toBuf, L",; ", &nextToken);
+                        while (token) {
+                            bool found = false;
+                            for (int r = 0; r < g_state.recipientCount; r++) {
+                                if (_wcsicmp(g_state.recipients[r].name, token) == 0) {
+                                    g_state.recipients[r].selected = true;
+                                    found = true;
+                                    break;
+                                }
+                            }
+                            if (!found && g_state.recipientCount < MAX_RECIPIENTS) {
+                                wcscpy_s(g_state.recipients[g_state.recipientCount].name, 128, token);
+                                wcscpy_s(g_state.recipients[g_state.recipientCount].hostName, 128, L"Custom");
+                                g_state.recipients[g_state.recipientCount].active = true;
+                                g_state.recipients[g_state.recipientCount].selected = true;
+                                g_state.recipientCount++;
+                            }
+                            token = wcstok_s(NULL, L",; ", &nextToken);
+                        }
+                        FilterRecipients();
                     } else if (_wcsicmp(argv[i], L"--theme") == 0 && i + 1 < argc) {
                         i++;
                         if (_wcsicmp(argv[i], L"light") == 0) {
@@ -1648,8 +1778,11 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
             if (wParam == VK_SPACE) {
                 if (g_state.filteredCount > 0 && g_state.highlightedFilteredIdx < g_state.filteredCount) {
                     int rIdx = g_state.filteredIndices[g_state.highlightedFilteredIdx];
-                    if (g_state.recipients[rIdx].active) {
-                        g_state.recipients[rIdx].selected = !g_state.recipients[rIdx].selected;
+                    if (g_state.recipients[rIdx].selected) {
+                        g_state.recipients[rIdx].selected = false;
+                        InvalidateRect(hWnd, NULL, FALSE);
+                    } else if (g_state.recipients[rIdx].active) {
+                        g_state.recipients[rIdx].selected = true;
                         InvalidateRect(hWnd, NULL, FALSE);
                     } else {
                         wchar_t warnBuf[256];

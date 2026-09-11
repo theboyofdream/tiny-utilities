@@ -1376,11 +1376,13 @@ static LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lP
 /* --- Overlay Window Procedure --- */
 static LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     static ULONGLONG g_startTime = 0;
+    static ULONGLONG g_lastCloseTime = 0;
     static bool      g_hasBeenActivated = false;
 
     switch (msg) {
     case WM_CREATE:
         g_startTime        = GetTickCount64();
+        g_lastCloseTime    = 0;
         g_hasBeenActivated = false;
         UpdateFontsForDpi(96);
         return 0;
@@ -1477,6 +1479,9 @@ static LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
                 DWORD targetPid = g_items[i].processId;
                 bool isShiftHeld = (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
 
+                CancelPendingAutoActivate(hwnd);
+                g_lastCloseTime = GetTickCount64();
+
                 if (isShiftHeld) {
                     /* Shift + Click: Force terminate process immediately */
                     HANDLE hProc = OpenProcess(PROCESS_TERMINATE, FALSE, targetPid);
@@ -1487,18 +1492,9 @@ static LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
                         EndTask(targetCloseHwnd, FALSE, TRUE);
                     }
                 } else {
-                    /* Normal Click: Graceful close with responsiveness check */
+                    /* Normal Click: Graceful close */
                     DWORD_PTR dwResult = 0;
-                    SendMessageTimeoutW(targetCloseHwnd, WM_CLOSE, 0, 0, SMTO_ABORTIFHUNG | SMTO_NORMAL, 120, &dwResult);
-
-                    /* If the window refused to close or opened an unsaved save prompt */
-                    if (IsWindow(targetCloseHwnd)) {
-                        /* Switch to that window so user can see and answer the modal save prompt */
-                        ActivateWindow(targetCloseHwnd);
-                        CancelPendingAutoActivate(hwnd);
-                        PostQuitMessage(0);
-                        return 0;
-                    }
+                    SendMessageTimeoutW(targetCloseHwnd, WM_CLOSE, 0, 0, SMTO_ABORTIFHUNG | SMTO_NORMAL, 100, &dwResult);
                 }
 
                 if (g_items[i].hThumbnail) {
@@ -1529,17 +1525,8 @@ static LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
                     g_selectedIndex = newVisibleCount > 0 ? (newVisibleCount - 1) : 0;
                 }
 
-                if (IsAltKeyDown()) {
-                    if (newVisibleCount > 0 && g_selectedIndex >= 0 && g_selectedIndex < newVisibleCount) {
-                        g_pendingHwndToActivate = g_items[newVisibleIndices[g_selectedIndex]].hwnd;
-                    }
-                    KillTimer(hwnd, TIMER_AUTO_ACTIVATE);
-                } else {
-                    if (newVisibleCount > 0 && g_selectedIndex >= 0 && g_selectedIndex < newVisibleCount) {
-                        TriggerAutoActivate(hwnd, g_items[newVisibleIndices[g_selectedIndex]].hwnd);
-                    }
-                }
-
+                /* Re-assert switcher foreground focus and do not auto-activate on close */
+                SetForegroundWindow(hwnd);
                 g_hoverCloseIndex = -1;
                 g_hoverIndex = -1;
                 InvalidateRect(hwnd, NULL, FALSE);
@@ -1661,6 +1648,11 @@ static LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
         if (activeState == WA_ACTIVE || activeState == WA_CLICKACTIVE) {
             g_hasBeenActivated = true;
         } else if (activeState == WA_INACTIVE) {
+            if (GetTickCount64() - g_lastCloseTime < 600) {
+                /* Window just closed in background; reclaim focus and keep overlay open */
+                SetForegroundWindow(hwnd);
+                return 0;
+            }
             if (!IsAltKeyDown() && g_hasBeenActivated && (GetTickCount64() - g_startTime > 350)) {
                 CancelPendingAutoActivate(hwnd);
                 PostQuitMessage(0);

@@ -1626,14 +1626,100 @@ User reported two issues:
 - Built release binary: `pwsh -File .\build.ps1 ip-send` -> `dist/release/ip-send.exe` (0 errors, 0 warnings).
 - Updated `docs/CHECKLIST.md` and `docs/JOURNEY.md`.
 
+---
 
+## [2026-09-08] Window Switcher Keep-Open on Close Button Click (`window-switcher.c`)
 
+### Context & Goal
+User reported: "closing window in window-switcher also closes window-switcher , why? ... but i want window-switcher to stay open".
+Previously, clicking the red cross (`✕`) on a card would immediately close the `window-switcher` overlay.
 
+### Root Cause Analysis
+1. **Premature `IsWindow()` Check**: In `WM_LBUTTONDOWN`, the close handler called `SendMessageTimeoutW(targetCloseHwnd, WM_CLOSE, ...)` and immediately tested `if (IsWindow(targetCloseHwnd))`. Modern Windows GUI apps (browsers, Electron apps, editors, Explorer) tear down asynchronously, so `IsWindow()` was almost always still true after 120 ms. The switcher assumed an unsaved modal save prompt was active, focused that window, and called `PostQuitMessage(0)`.
+2. **Auto-Activation Timer on Card Removal**: When an item was removed, `TriggerAutoActivate()` was called on the newly selected card, which started the delay countdown timer (`-d` / 300 ms) and closed the switcher upon timeout.
+3. **Focus Loss (`WM_ACTIVATE` / `WA_INACTIVE`)**: When a background window closed, Windows OS redistributed foreground focus, triggering `WA_INACTIVE` on the switcher overlay which caused an early exit.
 
+### Engineering Implementation
+1. **Asynchronous Graceful Dispatch**: Dispatched `WM_CLOSE` via `SendMessageTimeoutW` (or `TerminateProcess` / `EndTask` on `Shift + Click`), removed the closed card item from `g_items`, cleaned up the DWM thumbnail, recomputed hints and layout, and kept the switcher open.
+2. **Auto-Activation Suppression**: Cancelled pending auto-activate timers (`CancelPendingAutoActivate`) on close button clicks so closing windows acts as a pure management action without scheduling unwanted window switches.
+3. **Deactivation Shielding (`g_lastCloseTime`)**: Tracked `g_lastCloseTime = GetTickCount64()` on close events and shielded `OverlayWndProc` against `WA_INACTIVE` focus transitions within a 600 ms window by reclaiming foreground focus (`SetForegroundWindow(hwnd)`).
 
+### Verification & Build
+- Built release binary via `pwsh -File .\build.ps1 -Mode release window-switcher` -> `dist/release/window-switcher.exe` (0 errors, 0 warnings).
+- Updated `docs/window-switcher.md`, `docs/CHECKLIST.md`, and `docs/JOURNEY.md`.
 
+---
 
+## [2026-09-11] IP Send Recipient Selection & Focus Preservation Across Refreshes (`ip-send.c`)
 
+### Context & Motivation
+User reported: "if i have selected users in ip-send & refresh the list those checks gets unselected".
+In `ip-send`, users can select one or multiple online contacts to compose and dispatch messages or files. However, pressing `r` to refresh the live user list via `ipcmd.exe list /all` wiped all checked selections (`selected = false`) and reset the cursor position because incoming lines were parsed directly into `g_state.recipients` starting from index 0 without retaining the previous selection state.
 
+### Root Cause Analysis
+1. **Unconditional Selection Reset**: `QueryLiveIPMsgRecipients` parsed output lines directly into `g_state.recipients[count]`, hardcoding `g_state.recipients[count].selected = false` for every line.
+2. **Loss of Custom CLI Contacts**: Any selected recipients added via CLI `--to <name>` or unlisted contacts were completely overwritten if not present in the new `ipcmd` output.
+3. **Cursor Jump**: After refresh, `FilterRecipients()` adjusted `highlightedFilteredIdx` solely based on raw numeric boundaries, causing the user's cursor (`>`) to jump to a different user if list positions shifted.
+4. **Offline Deselection Lock**: In `WM_LBUTTONDOWN` and `VK_SPACE`, clicking or pressing Space checked `if (r->active)` before toggling selection. If an already-selected user was reported offline after a refresh, the user could not deselect them and received an offline warning toast instead.
 
+### Engineering Implementation
+1. **Recipient Equality Matching (`AreRecipientsEqual`)**:
+   - Implemented multi-tiered matching comparing non-empty UIDs (unique in IPMsg protocol), display names with hostnames, IP addresses, and custom CLI tokens.
+2. **Buffered Query & Selection Reconciliation**:
+   - Parsed query lines into a temporary array `s_tempRecipients` before mutating application state.
+   - For each newly parsed recipient, matched against `g_state.recipients` and transferred previous `selected` flags.
+   - Preserved any previously selected recipients that were not returned in the new query (such as custom CLI contacts or temporarily offline users).
+3. **Highlighted Cursor & Viewport Stabilization**:
+   - Captured the active highlighted recipient before refresh, and restored `g_state.highlightedFilteredIdx` and `scrollOffset` to the same recipient in the refreshed list.
+4. **Offline Deselection Guard**:
+   - In both `WM_LBUTTONDOWN` and `VK_SPACE`, allowed immediate deselection if `r->selected` is true, while preserving the offline warning guard for new selections.
+5. **IPC `--to` Support**:
+   - Implemented recipient parsing for `--to` arguments delivered via `WM_COPYDATA`.
 
+### Verification & Build
+- Built release binary: `pwsh -File .\build.ps1 ip-send` -> `dist/release/ip-send.exe` (0 errors, 0 warnings).
+- Built debug binary: `pwsh -File .\build.ps1 -Mode debug ip-send` -> `dist/debug/ip-send.exe` (0 errors, 0 warnings).
+- Smoke tested double-launch IPC toggle contract (`Exited: True`).
+- Verified documentation updates in `docs/ip-send.md`, `docs/CHECKLIST.md`, and `docs/JOURNEY.md`.
+
+## 2026-09-11: Pin to Top Premature Exit Bug, IPC Modernization & Window Filtering
+
+### Problems Identified
+1. **Premature Process Exit on Window Selection in Interactive Picker**:
+   - In `PickerWndProc`, `case WM_DESTROY:` called `PostQuitMessage(0);`.
+   - When the user clicked a window to pin it, `DestroyWindow(hwnd)` was called, synchronously triggering `WM_DESTROY`, which posted `WM_QUIT` to the thread's message queue.
+   - When `ShowInteractiveWindowPicker()` finished and `WinMain` entered its message loop, `PeekMessageW` immediately retrieved `WM_QUIT`, broke the tracking loop, called `RemovePinnedAt(0, true)` (unpinning the window that was just selected!), and terminated the process in ~16 ms.
+   - To the user, clicking a window closed the picker but nothing was pinned.
+2. **Common Headers Rule Violations (`tiny_ipc.h`, `tiny_cli.h`)**:
+   - `src/pin-to-top.c` was manually calling `CreateMutexW` without `tiny_ipc.h` and attempting to call `ReleaseMutex(mutex)` without owning the mutex (failing with `ERROR_NOT_OWNER`).
+   - `BuildConfig()` used a custom manual loop rather than `TinyCLI_ParseCommandLine()`.
+3. **Cloaked & Suspended Background Windows**:
+   - `EnumWindowsPickerProc` did not query `DWMWA_CLOAKED` (attribute 14) or filter `WS_EX_TOOLWINDOW`, causing invisible/suspended UWP apps or windows on other virtual desktops to be hovered and selected.
+4. **Window Replacement Lockout when `maxWindows` Reached**:
+   - When 1 window was pinned (`maxWindows = 1`), clicking a new window in the picker was silently rejected because `g_pinnedCount < g_cfg.maxWindows` evaluated to false.
+5. **Zombie Process on Window Closure**:
+   - If the user closed all pinned windows, `pin-to-top` stayed resident polling at 60 FPS instead of cleanly exiting.
+
+### Architectural Decisions & Changes
+1. **Picker Overlay Destruction Decoupled from Process Exit**:
+   - Removed `PostQuitMessage(0)` from `PickerWndProc`'s `WM_DESTROY`. The picker loop `while (g_pickerActive && GetMessageW(...))` terminates cleanly on `g_pickerActive = false`, leaving the process tracking loop intact.
+2. **Standardized Single-Instance IPC**:
+   - Integrated `TinyIPC_AcquireOrToggle(APPMUTEX_NAME, APPEVENT_NAME, &hEvent)` from `src/common/tiny_ipc.h`. Second launch signals `g_event` and exits with code 0; primary instance handles the toggle cleanly.
+3. **Declarative CLI Option Parsing**:
+   - Integrated `TinyCLI_ParseCommandLine` (`src/common/tiny_cli.h`) with a `CliOption` table for `--border-width`, `--max-windows`, `--window-selection`, and flags (`--no-picker`, `--active`, `--foreground`), retaining backward-compatible parsing for `--key=val` formats.
+4. **Enhanced Target Window Validation & Cloaking Detection**:
+   - Added `IsWindowCloaked(HWND)` using dynamic `dwmapi.dll` `DwmGetWindowAttribute` query with `DWMWA_CLOAKED`.
+   - Filtered out tool windows (`WS_EX_TOOLWINDOW` unless `WS_EX_APPWINDOW`), desktop/shell windows, and windows with <= 10 px dimensions.
+5. **FIFO Pin Limit Replacement**:
+   - When a user pins a new window while `g_pinnedCount >= g_cfg.maxWindows`, the oldest pinned window is unpinned (`RemovePinnedAt(0, true)`), allowing seamless switching.
+6. **Z-Order Preservation & Resize Repainting**:
+   - Registered overlay window class with `CS_HREDRAW | CS_VREDRAW` and added explicit invalidation on dimension changes to eliminate dirty border trails.
+   - When the pinned target is active foreground, the overlay border is maintained at topmost Z-order above it.
+7. **Clean Auto-Exit on Window Destruction**:
+   - When all pinned windows are closed by the user, `g_running` is set to `false`, exiting the process cleanly with code 0.
+
+### Verification & Build
+- Built release binary: `pwsh -File .\build.ps1 pin-to-top` -> `dist/release/pin-to-top.exe` (0 errors, 0 warnings).
+- Built debug binary: `pwsh -File .\build.ps1 -Mode debug pin-to-top` -> `dist/debug/pin-to-top.exe` (0 errors, 0 warnings).
+- Smoke tested single-instance double-launch toggle IPC pattern (`p1 running: True`, `p2 exited with: 0`).
+- Verified documentation updates in `docs/pin-to-top.md`, `docs/CHECKLIST.md`, and `docs/JOURNEY.md`.

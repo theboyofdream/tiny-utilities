@@ -101,8 +101,8 @@ window-switcher.exe [options]
 | `Escape` | Cancels window switching and closes switcher immediately without activating. |
 | `Mouse Hover` | Highlights card container or red cross close icon under cursor (changes to `IDC_HAND`). |
 | `Left Click (Card)` | Activates target window under cursor immediately. Click outside cancels and closes switcher. |
-| `Left Click (Red Cross ✕)` | Closes target window gracefully (`WM_CLOSE`). If the app prompts to save, immediately switches to that window so you can respond without layout shifting. |
-| `Shift + Left Click (✕)` | Force terminates target application process immediately (`TerminateProcess` / `EndTask`) bypassing save prompts. |
+| `Left Click (Red Cross ✕)` | Closes target window gracefully (`WM_CLOSE`), removing its card while keeping `window-switcher` open. If no windows remain, the switcher closes. |
+| `Shift + Left Click (✕)` | Force terminates target application process immediately (`TerminateProcess` / `EndTask`) while keeping `window-switcher` open. |
 
 ### Activation & Deactivation Stability
 - **Session-Lifetime Low-Level Keyboard Hook**: Installed on launch and unhooked on exit. Intercepts Alt, Tab, arrows, hints, and navigation keys globally during the session to prevent native Windows Alt+Tab dialog collisions.

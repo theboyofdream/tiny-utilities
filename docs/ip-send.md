@@ -70,7 +70,7 @@ ip-send.exe [--context-menu register|unregister|true|false]
 | `Ctrl + O` | Open File selection dialog |
 | `Ctrl + V` | Paste copied files or text (or paste into edit box when editing) |
 | `Insert` | Enter / Exit message edit mode (focuses normal native multiline text box) |
-| `r` | Refresh online recipient list via `ipcmd.exe list /all` (when not in message mode) |
+| `r` | Refresh online recipient list via `ipcmd.exe list /all` (preserves selected checks and cursor position) |
 | `/` | Show clean shortcut hints popup dialog without icon (when not in message mode) |
 | `Esc` | Exit message edit mode (or close composer window) |
 
