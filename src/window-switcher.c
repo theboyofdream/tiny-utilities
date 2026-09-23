@@ -21,6 +21,7 @@
 #include "common/tiny_dpi.h"
 #include "common/tiny_gui.h"
 #include "common/font.h"
+#include "common/color-thief-algorithm.h"
 
 #ifndef DWMWA_CLOAKED
 #define DWMWA_CLOAKED 14
@@ -41,6 +42,8 @@
 #ifndef DWM_TNS_OPACITY
 #define DWM_TNS_OPACITY 0x00000004
 #endif
+
+WINUSERAPI BOOL WINAPI EndTask(HWND hWnd, BOOL fShutDown, BOOL fForce);
 
 #define APPMUTEX_NAME L"Global\\TinyWindowSwitcherMutex"
 #define APPEVENT_NAME L"Global\\TinyWindowSwitcherEvent"
@@ -81,7 +84,11 @@ typedef struct {
     int            blurAmount;   /* 1..100, default 20 */
     COLORREF       tintColor;    /* default RGB(0,0,0) */
     BYTE           tintAlpha;    /* 0..255, default 102 (~40%) or hex #RRGGBBAA */
-    int            delayMs;      /* 0..5000, default 0 ms */
+    int            delayMs;      /* 0..5000, default 300 ms */
+    bool           altTab;       /* Force Alt+Tab / next item selection mode */
+    COLORREF       accentColor;  /* Accent color for selected card border & badge */
+    bool           hasCustomAccent; /* True if specified via CLI */
+    int            strokeWidth;  /* Focused card border stroke width in px (0..20, default 1) */
 } Config;
 
 typedef struct {
@@ -106,7 +113,7 @@ typedef struct {
     int     itemCount;
 } AppGroupInfo;
 
-static Config       g_cfg = { SORT_NAME, BG_BLUR, LAYOUT_CENTER, 20, RGB(0, 0, 0), 102, 300 };
+static Config       g_cfg = { SORT_NAME, BG_BLUR, LAYOUT_CENTER, 20, RGB(0, 0, 0), 102, 300, false, RGB(0, 120, 215), false, 1 };
 static WindowItem   g_items[MAX_WINDOWS];
 static int          g_itemCount = 0;
 static AppGroupInfo g_appGroups[MAX_APPS];
@@ -927,13 +934,21 @@ static void PaintOverlay(HWND hwnd, HDC hdc) {
     int height = rcClient.bottom - rcClient.top;
 
     HDC memDC = CreateCompatibleDC(hdc);
-    HBITMAP memBitmap = CreateCompatibleBitmap(hdc, width, height);
+    BITMAPINFO bmi = {0};
+    bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bmi.bmiHeader.biWidth = width;
+    bmi.bmiHeader.biHeight = -height; /* top-down DIB */
+    bmi.bmiHeader.biPlanes = 1;
+    bmi.bmiHeader.biBitCount = 32;
+    bmi.bmiHeader.biCompression = BI_RGB;
+
+    DWORD *pPixels = NULL;
+    HBITMAP memBitmap = CreateDIBSection(hdc, &bmi, DIB_RGB_COLORS, (void**)&pPixels, NULL, 0);
     HBITMAP hOldBitmap = (HBITMAP)SelectObject(memDC, memBitmap);
 
-    COLORREF bgFillColor = RGB(0, 0, 0);
-    HBRUSH bgBrush = CreateSolidBrush(bgFillColor);
-    FillRect(memDC, &rcClient, bgBrush);
-    DeleteObject(bgBrush);
+    if (pPixels) {
+        ZeroMemory(pPixels, width * height * sizeof(DWORD));
+    }
 
     int visibleIndices[MAX_WINDOWS];
     int visibleCount = 0;
@@ -1001,16 +1016,75 @@ static void PaintOverlay(HWND hwnd, HDC hdc) {
         bool isCloseHovered = (v == g_hoverCloseIndex);
         bool showClose = (isSelected || isHovered || isCloseHovered);
 
-        COLORREF cardBg = isSelected ? RGB(32, 38, 48) : (isHovered ? RGB(26, 30, 38) : RGB(16, 18, 23));
-        COLORREF cardBorder = isSelected ? RGB(0, 140, 255) : (isHovered ? RGB(70, 105, 150) : RGB(40, 44, 52));
+        /* Card border: only the focused card receives a border; unselected cards have no border */
+        int penWidth = 0;
+        if (g_cfg.strokeWidth > 0) {
+            if (g_cfg.strokeWidth == 1) {
+                penWidth = (scale >= 2.0f) ? 2 : 1;
+            } else {
+                penWidth = (int)(g_cfg.strokeWidth * scale + 0.5f);
+                if (penWidth < 1) penWidth = 1;
+            }
+        }
 
-        HBRUSH cBrush = CreateSolidBrush(cardBg);
-        HPEN cPen = CreatePen(PS_SOLID, isSelected ? (int)(2 * scale) : 1, cardBorder);
-        SelectObject(memDC, cBrush);
-        SelectObject(memDC, cPen);
-        RoundRect(memDC, r.left, r.top, r.right, r.bottom, (int)(8 * scale), (int)(8 * scale));
-        DeleteObject(cBrush);
-        DeleteObject(cPen);
+        if (isSelected && penWidth > 0) {
+            HBRUSH cBrush = (HBRUSH)GetStockObject(HOLLOW_BRUSH);
+            HPEN cPen = CreatePen(PS_SOLID, penWidth, g_cfg.accentColor);
+            HBRUSH hOldBrush = (HBRUSH)SelectObject(memDC, cBrush);
+            HPEN hOldPen = (HPEN)SelectObject(memDC, cPen);
+            RoundRect(memDC, r.left, r.top, r.right, r.bottom, (int)(8 * scale), (int)(8 * scale));
+            SelectObject(memDC, hOldBrush);
+            SelectObject(memDC, hOldPen);
+            DeleteObject(cPen);
+
+            /* Opacify only the focused card border pixels */
+            if (pPixels) {
+                int cyStart = r.top < 0 ? 0 : r.top;
+                int cyEnd   = r.bottom > height ? height : r.bottom;
+                int cxStart = r.left < 0 ? 0 : r.left;
+                int cxEnd   = r.right > width ? width : r.right;
+                for (int y = cyStart; y < cyEnd; y++) {
+                    DWORD *row = &pPixels[y * width];
+                    for (int x = cxStart; x < cxEnd; x++) {
+                        if ((row[x] & 0x00FFFFFF) != 0) {
+                            row[x] |= 0xFF000000;
+                        }
+                    }
+                }
+            }
+        }
+
+        /* Fill thumbnail backing area with 100% opaque black (Alpha = 255) so the live window
+         * thumbnail renders over a solid surface with zero desktop blur shining through */
+        if (pPixels) {
+            RECT pr = item->previewRect;
+            int yStart = pr.top < 0 ? 0 : pr.top;
+            int yEnd   = pr.bottom > height ? height : pr.bottom;
+            int xStart = pr.left < 0 ? 0 : pr.left;
+            int xEnd   = pr.right > width ? width : pr.right;
+            int rRad = (int)(6 * scale);
+            int rRad2 = rRad * rRad;
+
+            for (int y = yStart; y < yEnd; y++) {
+                DWORD *row = &pPixels[y * width];
+                for (int x = xStart; x < xEnd; x++) {
+                    bool inside = true;
+                    if (y > yEnd - rRad) {
+                        int dy = y - (yEnd - rRad);
+                        if (x < xStart + rRad) {
+                            int dx = (xStart + rRad) - x;
+                            if (dx * dx + dy * dy > rRad2) inside = false;
+                        } else if (x > xEnd - rRad) {
+                            int dx = x - (xEnd - rRad);
+                            if (dx * dx + dy * dy > rRad2) inside = false;
+                        }
+                    }
+                    if (inside) {
+                        row[x] = 0xFF000000;
+                    }
+                }
+            }
+        }
 
         /* Calculate hint badge size */
         SelectObject(memDC, g_hFontHint);
@@ -1048,20 +1122,43 @@ static void PaintOverlay(HWND hwnd, HDC hdc) {
         }
 
         /* Render Shortcut Hint Badge */
-        COLORREF badgeBg = isSelected ? RGB(0, 120, 240) : (isHovered ? RGB(35, 85, 155) : RGB(44, 58, 80));
+        COLORREF badgeBg = isSelected ? g_cfg.accentColor : (isHovered ? RGB(35, 85, 155) : RGB(44, 58, 80));
         HBRUSH badgeBrush = CreateSolidBrush(badgeBg);
         SelectObject(memDC, badgeBrush);
         SelectObject(memDC, GetStockObject(NULL_PEN));
         RoundRect(memDC, badgeRect.left, badgeRect.top, badgeRect.right, badgeRect.bottom, (int)(4 * scale), (int)(4 * scale));
         DeleteObject(badgeBrush);
 
-        SetTextColor(memDC, RGB(255, 255, 255));
+        /* Opacify badge background pill pixels to ensure solid accent color without opacity */
+        if (pPixels) {
+            int byStart = badgeRect.top < 0 ? 0 : badgeRect.top;
+            int byEnd   = badgeRect.bottom > height ? height : badgeRect.bottom;
+            int bxStart = badgeRect.left < 0 ? 0 : badgeRect.left;
+            int bxEnd   = badgeRect.right > width ? width : badgeRect.right;
+            for (int y = byStart; y < byEnd; y++) {
+                DWORD *row = &pPixels[y * width];
+                for (int x = bxStart; x < bxEnd; x++) {
+                    if ((row[x] & 0x00FFFFFF) != 0) {
+                        row[x] |= 0xFF000000;
+                    }
+                }
+            }
+        }
+
+        /* Choose high-contrast badge text color based on accent luminance */
+        BYTE bR = GetRValue(badgeBg);
+        BYTE bG = GetGValue(badgeBg);
+        BYTE bB = GetBValue(badgeBg);
+        int badgeLum = (int)(0.299f * bR + 0.587f * bG + 0.114f * bB);
+        COLORREF badgeTextColor = (isSelected && badgeLum > 160) ? RGB(10, 10, 10) : RGB(255, 255, 255);
+
+        SetTextColor(memDC, badgeTextColor);
         SelectObject(memDC, g_hFontHint);
         DrawTextW(memDC, item->hint, -1, &badgeRect, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
 
         /* App Name and Window Title */
         SelectObject(memDC, g_hFontTitle);
-        SetTextColor(memDC, isSelected ? RGB(235, 242, 255) : RGB(175, 185, 198));
+        SetTextColor(memDC, isSelected ? RGB(245, 248, 255) : RGB(205, 215, 230));
 
         wchar_t appTitleBuf[384];
         if (wcslen(item->title) > 0 && _wcsicmp(item->appName, item->title) != 0) {
@@ -1123,6 +1220,7 @@ static void PaintOverlay(HWND hwnd, HDC hdc) {
     }
 
     SelectObject(memDC, hOldFont);
+
     BitBlt(hdc, 0, 0, width, height, memDC, 0, 0, SRCCOPY);
 
     SelectObject(memDC, hOldBitmap);
@@ -1153,7 +1251,9 @@ static void CancelPendingAutoActivate(HWND hwndOverlay) {
 }
 
 static bool IsAltKeyDown(void) {
-    return (GetAsyncKeyState(VK_MENU) & 0x8000) != 0;
+    return ((GetAsyncKeyState(VK_MENU) & 0x8000) != 0) ||
+           ((GetAsyncKeyState(VK_LMENU) & 0x8000) != 0) ||
+           ((GetAsyncKeyState(VK_RMENU) & 0x8000) != 0);
 }
 
 static void TriggerAutoActivate(HWND hwndOverlay, HWND targetHwnd) {
@@ -1692,6 +1792,10 @@ static void ShowHelp(void) {
                 "  --blur <amount>          Blur intensity (1..100, default: 20)\n"
                 "  --tint-color <color>     Tint hex color e.g. #000000 or #00000005 (default: #000000)\n"
                 "  -d, --delay <ms>         Auto-activation delay in milliseconds (0..5000, default: 300)\n"
+                "  -c, --accent-color <hex> Accent hex color e.g. #0078D7 or #FF5500 (default: Windows wallpaper accent)\n"
+                "  -sw, --stroke-width <px> Card border stroke width in px (0..20, default: 1; 0 disables border)\n"
+                "  -a, --alt-tab            Start with next item selected (Alt+Tab mode)\n"
+                "  -n, --next               Alias for --alt-tab\n"
                 "  -h, --help               Show this help message\n"
                 "  -v, --version            Show version information\n";
             DWORD written = 0;
@@ -1709,6 +1813,10 @@ static void ShowHelp(void) {
             L"  --blur <amount>          Blur intensity (1..100, default: 20)\n"
             L"  --tint-color <color>     Tint hex color e.g. #000000 or #00000005 (default: #000000)\n"
             L"  -d, --delay <ms>         Auto-activation delay in milliseconds (0..5000, default: 300)\n"
+            L"  -c, --accent-color <hex> Accent hex color e.g. #0078D7 or #FF5500 (default: Windows wallpaper accent)\n"
+            L"  -sw, --stroke-width <px> Card border stroke width in px (0..20, default: 1; 0 disables border)\n"
+            L"  -a, --alt-tab            Start with next item selected (Alt+Tab mode)\n"
+            L"  -n, --next               Alias for --alt-tab\n"
             L"  -h, --help               Show this help message\n"
             L"  -v, --version            Show version information",
             L"Tiny Window Switcher — Help",
@@ -1722,6 +1830,7 @@ static bool ParseCLI(void) {
     const wchar_t *sortStr = NULL;
     const wchar_t *bgModeStr = NULL;
     const wchar_t *tintColorStr = NULL;
+    const wchar_t *accentColorStr = NULL;
     bool showHelp = false;
     bool showVersion = false;
 
@@ -1736,6 +1845,16 @@ static bool ParseCLI(void) {
         { L"--tint-color",   CLI_OPT_STRING, &tintColorStr,      0, 0 },
         { L"--delay",        CLI_OPT_INT,    &g_cfg.delayMs,     0, 5000 },
         { L"-d",             CLI_OPT_INT,    &g_cfg.delayMs,     0, 5000 },
+        { L"--accent-color",  CLI_OPT_STRING, &accentColorStr,    0, 0 },
+        { L"--accent",        CLI_OPT_STRING, &accentColorStr,    0, 0 },
+        { L"-c",              CLI_OPT_STRING, &accentColorStr,    0, 0 },
+        { L"--stroke-width",  CLI_OPT_INT,    &g_cfg.strokeWidth, 0, 20 },
+        { L"--stroke",        CLI_OPT_INT,    &g_cfg.strokeWidth, 0, 20 },
+        { L"-sw",             CLI_OPT_INT,    &g_cfg.strokeWidth, 0, 20 },
+        { L"--alt-tab",      CLI_OPT_BOOL,   &g_cfg.altTab,      0, 0 },
+        { L"-a",             CLI_OPT_BOOL,   &g_cfg.altTab,      0, 0 },
+        { L"--next",         CLI_OPT_BOOL,   &g_cfg.altTab,      0, 0 },
+        { L"-n",             CLI_OPT_BOOL,   &g_cfg.altTab,      0, 0 },
         { L"--help",         CLI_OPT_BOOL,   &showHelp,          0, 0 },
         { L"-h",             CLI_OPT_BOOL,   &showHelp,          0, 0 },
         { L"--version",      CLI_OPT_BOOL,   &showVersion,       0, 0 },
@@ -1744,9 +1863,42 @@ static bool ParseCLI(void) {
 
     TinyCLI_ParseCommandLine(options, sizeof(options)/sizeof(options[0]));
 
+    const wchar_t *rawCmd = GetCommandLineW();
+    if (rawCmd) {
+        wchar_t buf[2048];
+        wcsncpy_s(buf, sizeof(buf)/sizeof(buf[0]), rawCmd, _TRUNCATE);
+        wchar_t *argv[TINY_CLI_MAX_ARGS];
+        int argc = TinyCLI_Tokenize(buf, argv, TINY_CLI_MAX_ARGS);
+        for (int i = 1; i < argc; i++) {
+            if (_wcsnicmp(argv[i], L"--stroke-width=", 15) == 0) {
+                g_cfg.strokeWidth = _wtoi(argv[i] + 15);
+            } else if (_wcsnicmp(argv[i], L"--stroke=", 9) == 0) {
+                g_cfg.strokeWidth = _wtoi(argv[i] + 9);
+            } else if (_wcsnicmp(argv[i], L"-sw=", 4) == 0) {
+                g_cfg.strokeWidth = _wtoi(argv[i] + 4);
+            }
+        }
+    }
+    if (g_cfg.strokeWidth < 0) g_cfg.strokeWidth = 0;
+    if (g_cfg.strokeWidth > 20) g_cfg.strokeWidth = 20;
+
     if (showHelp || showVersion) {
         ShowHelp();
         return false;
+    }
+
+    if (accentColorStr) {
+        BYTE dummyAlpha = 255;
+        ParseHexColorWithAlpha(accentColorStr, &g_cfg.accentColor, &dummyAlpha);
+        g_cfg.hasCustomAccent = true;
+    }
+
+    if (!g_cfg.hasCustomAccent) {
+        g_cfg.accentColor = GetWallpaperDominantColorThief();
+    }
+
+    if (g_cfg.accentColor == RGB(0, 0, 0)) {
+        g_cfg.accentColor = RGB(1, 1, 1);
     }
 
     if (layoutStr) {
@@ -1795,16 +1947,49 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR lpCmdLin
         return 0;
     }
 
-    /* Detect if Alt key is currently held down when launched */
-    g_altTabMode = (GetAsyncKeyState(VK_MENU) & 0x8000) != 0;
+    /* Capture active foreground window BEFORE creating any windows or altering Z-order */
+    HWND hForeground = GetForegroundWindow();
+    if (hForeground) {
+        HWND hRoot = GetAncestor(hForeground, GA_ROOT);
+        if (hRoot) hForeground = hRoot;
+    }
+
+    /* Detect if Alt key is currently held down when launched, or if explicitly requested via CLI */
+    g_altTabMode = IsAltKeyDown() || g_cfg.altTab;
+
+    /* Install session-lifetime low-level keyboard hook early to intercept input seamlessly */
+    g_hKeyboardHook = SetWindowsHookExW(WH_KEYBOARD_LL, LowLevelKeyboardProc, hInstance, 0);
 
     /* Enumerate open windows */
     g_itemCount = 0;
     EnumWindows(EnumWindowsProc, 0);
 
     if (g_itemCount == 0) {
+        if (g_hKeyboardHook) {
+            UnhookWindowsHookEx(g_hKeyboardHook);
+            g_hKeyboardHook = NULL;
+        }
         CloseHandle(hEvent);
         return 0;
+    }
+
+    /* In MRU mode, guarantee the true active foreground window is anchored at index 0 */
+    if (g_cfg.sort == SORT_RECENT && hForeground != NULL) {
+        int fgIdx = -1;
+        for (int i = 0; i < g_itemCount; i++) {
+            if (g_items[i].hwnd == hForeground) {
+                fgIdx = i;
+                break;
+            }
+        }
+        if (fgIdx > 0) {
+            WindowItem fgItem = g_items[fgIdx];
+            memmove(&g_items[1], &g_items[0], fgIdx * sizeof(WindowItem));
+            g_items[0] = fgItem;
+            for (int i = 0; i < g_itemCount; i++) {
+                g_items[i].mruOrder = i;
+            }
+        }
     }
 
     /* Apply Sorting */
@@ -1838,6 +2023,10 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR lpCmdLin
     );
 
     if (!g_hwndOverlay) {
+        if (g_hKeyboardHook) {
+            UnhookWindowsHookEx(g_hKeyboardHook);
+            g_hKeyboardHook = NULL;
+        }
         CloseHandle(hEvent);
         return 0;
     }
@@ -1847,8 +2036,8 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR lpCmdLin
     ComputeLayout(g_hwndOverlay, &overlayW, &overlayH);
     SetForegroundWindow(g_hwndOverlay);
 
-    /* Selection defaults to second item if Alt+Tab mode, else first item */
-    if (g_altTabMode && g_itemCount > 1) {
+    /* In recent (MRU) mode, Alt+Tab mode, or with --alt-tab flag, default selection is the second item (previous window) */
+    if ((g_altTabMode || g_cfg.sort == SORT_RECENT || g_cfg.altTab) && g_itemCount > 1) {
         g_selectedIndex = 1;
     } else {
         g_selectedIndex = 0;
@@ -1860,9 +2049,6 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR lpCmdLin
     if (g_itemCount > 0 && g_selectedIndex >= 0 && g_selectedIndex < g_itemCount) {
         TriggerAutoActivate(g_hwndOverlay, g_items[g_selectedIndex].hwnd);
     }
-
-    /* Install session-lifetime low-level keyboard hook */
-    g_hKeyboardHook = SetWindowsHookExW(WH_KEYBOARD_LL, LowLevelKeyboardProc, hInstance, 0);
 
     /* Message & IPC Loop */
     MSG msg;

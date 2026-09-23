@@ -165,17 +165,91 @@ static int ColorThiefGetSaturationScore(int r, int g, int b)
     return (maxC - minC) * 255 / maxC;
 }
 
+#ifndef RRF_RT_REG_BINARY
+#define RRF_RT_REG_BINARY 0x00000008
+#endif
+#ifndef RRF_RT_REG_DWORD
+#define RRF_RT_REG_DWORD 0x00000010
+#endif
+
+typedef LSTATUS (APIENTRY *RegGetValueWFn)(
+    HKEY    hkey,
+    LPCWSTR lpSubKey,
+    LPCWSTR lpValue,
+    DWORD   dwFlags,
+    LPDWORD pdwType,
+    PVOID   pvData,
+    LPDWORD pcbData
+);
+
+/* Query true active Windows System Accent Color (Personalization / auto-from-wallpaper) */
+static COLORREF GetWindowsAccentColorFromRegistry(void)
+{
+    HMODULE advapi = LoadLibraryW(L"advapi32.dll");
+    if (advapi != NULL) {
+        RegGetValueWFn pRegGetValueW = (RegGetValueWFn)(void*)GetProcAddress(advapi, "RegGetValueW");
+        if (pRegGetValueW != NULL) {
+            /* 1. Try Explorer AccentPalette (entry 3: bytes 12..14 is the base accent RGB) */
+            BYTE palette[32];
+            DWORD size = sizeof(palette);
+            if (pRegGetValueW(HKEY_CURRENT_USER,
+                              L"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Accent",
+                              L"AccentPalette",
+                              RRF_RT_REG_BINARY, NULL, palette, &size) == ERROR_SUCCESS && size >= 16) {
+                FreeLibrary(advapi);
+                return RGB(palette[12], palette[13], palette[14]);
+            }
+
+            /* 2. Try DWM AccentColor (ABGR DWORD: 0xAABBGGRR) */
+            DWORD dwmColor = 0;
+            size = sizeof(dwmColor);
+            if (pRegGetValueW(HKEY_CURRENT_USER,
+                              L"Software\\Microsoft\\Windows\\DWM",
+                              L"AccentColor",
+                              RRF_RT_REG_DWORD, NULL, &dwmColor, &size) == ERROR_SUCCESS && dwmColor != 0) {
+                FreeLibrary(advapi);
+                BYTE r = (BYTE)(dwmColor & 0xFF);
+                BYTE g = (BYTE)((dwmColor >> 8) & 0xFF);
+                BYTE b = (BYTE)((dwmColor >> 16) & 0xFF);
+                return RGB(r, g, b);
+            }
+
+            /* 3. Try Explorer AccentColorMenu (ABGR DWORD) */
+            DWORD menuColor = 0;
+            size = sizeof(menuColor);
+            if (pRegGetValueW(HKEY_CURRENT_USER,
+                              L"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Accent",
+                              L"AccentColorMenu",
+                              RRF_RT_REG_DWORD, NULL, &menuColor, &size) == ERROR_SUCCESS && menuColor != 0) {
+                FreeLibrary(advapi);
+                BYTE r = (BYTE)(menuColor & 0xFF);
+                BYTE g = (BYTE)((menuColor >> 8) & 0xFF);
+                BYTE b = (BYTE)((menuColor >> 16) & 0xFF);
+                return RGB(r, g, b);
+            }
+        }
+        FreeLibrary(advapi);
+    }
+    return CLR_INVALID;
+}
+
 typedef HRESULT(WINAPI *DwmGetColorizationColorFn)(DWORD *, BOOL *);
 
 static COLORREF GetWallpaperDominantColorThief(void)
 {
     const COLORREF fallback = RGB(0, 120, 215);
 
-    /* 1. Primary choice: System DWM Accent Color (exact wallpaper accent color calculated by Windows) */
+    /* 1. Primary choice: Active Windows System Accent Color (Settings / Wallpaper accent) */
+    COLORREF sysAccent = GetWindowsAccentColorFromRegistry();
+    if (sysAccent != CLR_INVALID) {
+        return sysAccent;
+    }
+
+    /* 2. Secondary choice: System DWM Colorization Color */
     HMODULE dwm = LoadLibraryW(L"dwmapi.dll");
     if (dwm != NULL) {
         DwmGetColorizationColorFn fn =
-            (DwmGetColorizationColorFn)GetProcAddress(dwm, "DwmGetColorizationColor");
+            (DwmGetColorizationColorFn)(void*)GetProcAddress(dwm, "DwmGetColorizationColor");
         if (fn != NULL) {
             DWORD colorization = 0;
             BOOL opaque = FALSE;
@@ -190,7 +264,7 @@ static COLORREF GetWallpaperDominantColorThief(void)
         FreeLibrary(dwm);
     }
 
-    /* 2. Fallback: Color Thief MMCQ quantization over screen sample */
+    /* 3. Fallback: Color Thief MMCQ quantization over screen sample */
     HDC screenDC = GetDC(NULL);
     if (screenDC == NULL)
         return fallback;

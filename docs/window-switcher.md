@@ -32,6 +32,10 @@ window-switcher.exe [options]
 | `--blur <amount>` | — | `1..100` | `20` | Backdrop blur intensity (1..30 maps to Aero light glass blur; 31..100 maps to heavy Acrylic frosted blur). |
 | `--tint-color <hex>` | — | `#RRGGBBAA` / `#RRGGBB` | `#000000` | Backdrop tint hex color with optional alpha opacity (e.g. `#00000005`). |
 | `--delay <ms>` | `-d` | `0..5000` | `300` | Auto-activation delay in milliseconds before switching to window (e.g. default `300` ms allowing fast multi-character hint typing like `C` $\rightarrow$ `CH`). |
+| `--accent-color <hex>` | `-c`, `--accent` | `#RRGGBB` / `#RRGGBBAA` | Windows wallpaper accent | Custom accent color for selected card border and badge. Defaults dynamically to Windows system wallpaper accent via `GetWallpaperDominantColorThief()`. |
+| `--stroke-width <px>` | `-sw`, `--stroke` | `0..20` | `1` | Focused card border stroke width in pixels (`0` completely disables border, `1` default slim stroke scaled with DPI). |
+| `--alt-tab` | `-a` | Flag | `false` | Start with next item selected (Alt+Tab mode). Automatically enabled when `--sort recent` is active or Alt key is held. |
+| `--next` | `-n` | Flag | `false` | Alias for `--alt-tab`. |
 | `--help` | `-h` | Flag | `false` | Display command-line usage and help. |
 | `--version` | `-v` | Flag | `false` | Display version information. |
 
@@ -64,8 +68,8 @@ window-switcher.exe [options]
 - **Container Header Bar**: Aligned precisely to card grid margins (`g_containerRect.left`). Displays search filter status or active switcher config parameters.
 - **Card Header Bar** (`r.top + 2` to `r.top + 20`):
   - **Left Side**: `App Name — Window Title` rendered with `common/font.h` UI font (`TinyFont_GetBestUIFace()`) and smooth ellipsis truncation (`DT_END_ELLIPSIS`).
-  - **Right Side**: Borderless shortcut hint badge (`[ F ]`, `[ N+ ]`, `[ C1 ]`) and hover close cross (`✕`) with crisp white text (`RGB(255, 255, 255)`):
-    - **Selected**: `RGB(0, 120, 240)` (vibrant cyan-blue fill).
+  - **Right Side**: Borderless shortcut hint badge (`[ F ]`, `[ N+ ]`, `[ C1 ]`) and hover close cross (`✕`) with crisp white or dark luminance-aware text:
+    - **Selected**: Dynamic wallpaper accent or custom `--accent-color <hex>` fill.
     - **Hovered**: `RGB(35, 85, 155)` (distinct indigo fill).
     - **Normal**: `RGB(44, 58, 80)` (distinct rich slate blue fill).
 - **Card Body / Live Preview Area** (`previewRect`: `r.left + 2`, `r.top + 25` to `r.right - 2`, `r.bottom - 2`):
@@ -80,7 +84,12 @@ window-switcher.exe [options]
 - **Dynamic Columns in Full Layout (`--layout full`)**: Column count is computed dynamically based on target physical card width (`availW / (targetCardW + gap)`), capping large desktop monitors (2560x1440, 4K) to 6–8 columns. Prevents cards from stretching into massive 600px+ pillars on large monitors while keeping cards at their exact configured physical dimensions.
 
 ### Robust Single-Window Architecture
-- Single top-level topmost window (`g_hwndOverlay`) with GDI double-buffered rendering (`BitBlt`).
+- Single top-level topmost window (`g_hwndOverlay`) with 32-bit top-down DIB Section rendering (`CreateDIBSection` + `BitBlt`) and native DWM blur-behind composition.
+- **Borderless Transparent Frosted Glass Cards**: Unselected cards have no border, floating cleanly with transparent interiors (`0x00000000`) over the blurred desktop backdrop.
+- **Slim Focused Window Border**: The focused/selected card is framed with a slim border (default 1px at standard DPI, 2px at $\ge$200% DPI; configurable via `--stroke-width <px>` / `-sw <px>` `0..20`, where `0` completely disables the border) in 100% solid, opaque accent color (custom `-c <hex>` or Windows wallpaper accent).
+- **100% Opaque Live Window Preview Thumbnails**: The thumbnail preview viewport (`item->previewRect`) is backed with 100% opaque black (`0xFF000000`) with smooth rounded corners, preventing DWM desktop blur from shining through the live preview.
+- **100% Solid Shortcut Hint Badges**: The badge background pill has full `0xFF` alpha opacification, rendering solid `#000fff` or wallpaper accent without opacity.
+- **Clean Anti-Aliased Typography**: Floating text (switcher header bar, app name, and window title) renders with GDI's natural font smoothing without alpha distortion, ensuring completely clean, crisp glyphs with zero dark borders or halos.
 - Eliminates multi-window Z-order synchronization issues, layered window color-key clipping, and activation flicker.
 
 ---
@@ -105,7 +114,9 @@ window-switcher.exe [options]
 | `Shift + Left Click (✕)` | Force terminates target application process immediately (`TerminateProcess` / `EndTask`) while keeping `window-switcher` open. |
 
 ### Activation & Deactivation Stability
-- **Session-Lifetime Low-Level Keyboard Hook**: Installed on launch and unhooked on exit. Intercepts Alt, Tab, arrows, hints, and navigation keys globally during the session to prevent native Windows Alt+Tab dialog collisions.
+- **Foreground Window MRU Anchor**: Captures `GetForegroundWindow()` on launch and guarantees it occupies index 0 in MRU sort mode. Prevents unfocused `WS_EX_TOPMOST` windows from shifting the active window and misaligning the initial selection.
+- **Initial Selection Guarantee (Second Item / Index 1)**: In `recent` (MRU) mode, whenever the Alt key is detected (checking `VK_MENU`, `VK_LMENU`, `VK_RMENU`), or when `--alt-tab` / `-a` is passed, the switcher opens with the second item (`g_selectedIndex = 1`) selected. Eliminates race conditions during fast Alt+Tab keypresses where Alt is released before process initialization completes.
+- **Session-Lifetime Low-Level Keyboard Hook**: Installed immediately upon launch and cleanly unhooked on exit. Intercepts Alt, Tab, arrows, hints, and navigation keys globally during the session to prevent native Windows Alt+Tab dialog collisions.
 - **IPC Toggle Alt-Held Awareness**: If AHK launches a second instance when `Tab` is pressed while holding `Alt`, the IPC toggle event advances window selection instead of closing the switcher.
 - **Focus Loss Protection**: `WA_INACTIVE` is ignored while `Alt` is held down, preventing unwanted exits during system focus transitions.
 

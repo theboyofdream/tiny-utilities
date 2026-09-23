@@ -146,4 +146,4 @@ OCRSnip() {
 ; Win + Ctrl + O = snip → OCR → clipboard
 #^O::OCRSnip()
 
-!Tab::Run(".\window-switcher.exe -l center -s recent")
+!Tab::Run(".\window-switcher.exe -bg blur --blur 40 -l center -s recent -a -sw 0")

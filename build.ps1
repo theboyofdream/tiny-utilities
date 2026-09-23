@@ -60,7 +60,7 @@ $TARGET_CONFIGS = [ordered]@{
     }
     'window-switcher' = @{
         Subsystem   = 'windows'
-        Libs        = @('user32', 'gdi32', 'dwmapi', 'shell32', 'ole32', 'version')
+        Libs        = @('user32', 'gdi32', 'dwmapi', 'shell32', 'ole32', 'version', 'advapi32')
         ExtraMinGW  = @('-municode')
         Aliases     = @('switcher', 'win-switch', 'windowswitcher')
     }

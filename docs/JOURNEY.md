@@ -1723,3 +1723,116 @@ In `ip-send`, users can select one or multiple online contacts to compose and di
 - Built debug binary: `pwsh -File .\build.ps1 -Mode debug pin-to-top` -> `dist/debug/pin-to-top.exe` (0 errors, 0 warnings).
 - Smoke tested single-instance double-launch toggle IPC pattern (`p1 running: True`, `p2 exited with: 0`).
 - Verified documentation updates in `docs/pin-to-top.md`, `docs/CHECKLIST.md`, and `docs/JOURNEY.md`.
+
+---
+
+## 2026-09-23: Window Switcher Alt+Tab Selection Fix & Dynamic Wallpaper Accent Color (`window-switcher.c`)
+
+### Problems Identified
+1. **Alt+Tab Staying on First Item (Index 0)**:
+   - User reported: `"when i press alt+tab tab switcher stays in first item sometimes instead of going to second item"` while using AutoHotkey binding `!Tab::Run(".\window-switcher.exe -l center -s recent")`.
+   - **Root Cause A (Fast Keystroke Race Condition)**: `g_altTabMode` was checked once at process startup via `(GetAsyncKeyState(VK_MENU) & 0x8000) != 0`. On fast `Alt+Tab` keypresses (where Alt is released within 40–80 ms), by the time `window-switcher.exe` was spawned by AHK, DLLs loaded, and `wWinMain` reached the check, Alt was already physically up. `g_altTabMode` evaluated to `false`, causing `g_selectedIndex` to default to `0` (the active window). The delay timer then committed item 0, staying on the same application.
+   - **Root Cause B (Topmost Window Z-Order Inversion)**: `EnumWindows` returns windows in strict Z-order where any `WS_EX_TOPMOST` window (e.g. `pin-to-top`, always-on-top terminals, Task Manager) appears before normal windows, even if inactive. If a topmost window existed, it took index 0 while the actual foreground app took index 1. Setting `g_selectedIndex = 1` selected the window the user was already in.
+   - **Root Cause C (Limited Key Code Checks)**: Only `VK_MENU` was queried, missing `VK_LMENU` / `VK_RMENU` under certain keyboard drivers and AHK hook states.
+   - **Root Cause D (Hook Installation Timing)**: `SetWindowsHookExW` was installed late after window creation, allowing keystrokes during initialization to be unhandled.
+
+2. **Accent Color Optical Washout & Wallpaper Accent Parity**:
+   - User reported: `"add accent-color cli arg so i can change accent color bcz current accent color is almost invisble in light themed applications"` and `"why accent color is changing based on what app color is behind? shouldn't it is supposed to follow wallpaper color like windows does?"`.
+   - **Root Cause**: The accent color was hardcoded to cyan `RGB(0, 140, 255)`. Under DWM glass blur (`ACCENT_ENABLE_BLURBEHIND`), light from white/light-themed applications behind the overlay bleeds through, optically washing out the cyan hue and making the selection border nearly invisible.
+   - The utility was not querying the Windows system / wallpaper accent color.
+
+### Architectural Decisions & Refinements
+1. **Foreground Window MRU Anchor**:
+   - Captures `GetForegroundWindow()` (with `GetAncestor(..., GA_ROOT)` resolution) at the very start of `wWinMain` before creating windows or altering Z-order.
+   - In `SORT_RECENT` mode, searches enumerated windows for `hForeground` and moves it to index 0, shifting preceding items down and re-indexing `mruOrder`.
+   - Guarantees index 0 is always the active application and index 1 is always the previously active application.
+
+2. **Guaranteed Selection of Second Item (Index 1) for MRU & Alt+Tab**:
+   - Updated selection logic: in `SORT_RECENT` mode, whenever Alt is detected, or when `--alt-tab` / `-a` (`--next` / `-n`) is passed, selection defaults to item 1 whenever `g_itemCount > 1`.
+   - Updated `IsAltKeyDown()` to check `VK_MENU`, `VK_LMENU`, and `VK_RMENU`.
+   - Moved `SetWindowsHookExW(WH_KEYBOARD_LL, ...)` early in `wWinMain` immediately after IPC acquisition.
+
+3. **Dynamic Wallpaper Accent Color via `color-thief-algorithm.h`**:
+   - Included `src/common/color-thief-algorithm.h` and defaulted `g_cfg.accentColor` to `GetWallpaperDominantColorThief()`, querying the Windows system wallpaper accent color via `DwmGetColorizationColor` with MMCQ quantization fallback.
+   - Added `-c, --accent-color, --accent <hex>` CLI option supporting `#RRGGBB` / `#RRGGBBAA` formats to allow custom high-contrast colors (e.g. `#FF6600`, `#E81123`).
+   - Thickened selected card border to bold 2–3px (`(int)(2.5f * scale + 0.5f)`).
+   - Applied accent color to selected hint badge with dynamic luminance-aware text coloring (black text on high-luminance accents, white text on dark accents).
+
+4. **Solid Accent Color, Opaque Window Previews, Slim Focused Border & Clean Typography**:
+   - User reported: `"fonts have borders? previously they were clean & reduce the stroke width of focused window border"` and `"also no border needed for card"`.
+   - **Root Cause of Font Borders**:
+     A global opacification loop (`pPixels[p] |= 0xFF000000`) had previously been applied across the entire bitmap. GDI's anti-aliased font rendering blends text glyph edges with the black background (`0x00000000`), generating fringe pixels with low RGB values (e.g. `RGB(25, 25, 25)`). Setting `alpha = 255` on these pixels turned anti-aliased fringes into 100% opaque dark dots, creating visible dark halos / borders around every character when composited over the blurred desktop backdrop.
+   - **Architectural Solution**:
+     1. **Clean Anti-Aliased Typography (Removed Global Opacification)**: Removed the global opacification loop completely. Floating text in the switcher header bar (`headerRect`) and card headers (`appHeaderRect`) renders with GDI's natural font smoothing, eliminating dark halos and restoring clean, crisp typography.
+     2. **Borderless Unselected Cards**: Per user directive, unselected cards draw NO border at all, floating borderless with transparent frosted glass interiors (`0x00000000`) over the blurred backdrop.
+     3. **Slim Focused Window Border**: The focused card receives a slim 1px border (`penWidth = 1`, or 2 at $\ge$200% DPI) styled with 100% solid, opaque accent color (custom `-c <hex>` or Windows wallpaper accent).
+     4. **Targeted Alpha Opacification**: Only the focused card border stroke and the shortcut badge pill (`badgeRect`) have their pixels opacified to `0xFF` alpha, guaranteeing solid, vibrant `#000fff` without opacity or text corruption.
+     5. **100% Opaque Live Window Preview Thumbnails**: The preview viewport (`item->previewRect`) is backed with 100% opaque black (`0xFF000000`) with rounded corners, ensuring the live thumbnail preview is completely solid with zero blur bleed-through.
+
+### Verification & Build
+- Built release binary: `pwsh -File .\build.ps1 window-switcher` -> `dist/release/window-switcher.exe` (0 errors, 0 warnings).
+- Built debug binary: `pwsh -File .\build.ps1 -Mode debug window-switcher` -> `dist/debug/window-switcher.exe` (0 errors, 0 warnings).
+- Tested CLI help: `window-switcher.exe --help` displays `-c, --accent-color`, `-a, --alt-tab`, and `-n, --next`.
+- Updated `docs/window-switcher.md`, `docs/shortcuts.ahk`, `docs/CHECKLIST.md`, and `docs/JOURNEY.md`.
+
+---
+
+## 2026-09-23: Windows System Accent Color Resolution & Zero Screen Drift (`color-thief-algorithm.h`)
+
+### User Feedback & Problem Statement
+- User asked: `"have you hardcoded #000fff ? if accent color not passed then it should pick color what windows accent has"`.
+- User had previously noted: `"why accent color is changing based on what app color is behind? shouldn't it is supposed to follow wallpaper color like windows does?"`.
+
+### Technical Root Cause
+1. **Clarification on `#000fff`**: `#000fff` was never hardcoded in the codebase; it was previously supplied by the user on the command line via `-c #000fff` during testing. When no `-c` is passed, the utility falls back to `GetWallpaperDominantColorThief()`.
+2. **Deficiency in Legacy DWM Colorization**:
+   - `DwmGetColorizationColor` in `dwmapi.dll` returns the legacy Windows 7 Aero glass tint (e.g. `0xC45C2718` -> dark brown `RGB(83, 35, 22)`), which does NOT correspond to the modern Windows 10/11 Personalization accent color.
+   - When DWM colorization failed or fell back to MMCQ quantization, `color-thief-algorithm.h` sampled `screenDC = GetDC(NULL)`. Because `screenDC` captures whatever application is on screen (e.g., a bright white browser window or a dark editor), the sampled accent color drifted lighter on light apps and darker on dark apps.
+
+### Architecture & Solution
+1. **Modern Windows 10/11 Registry Accent Palette Query**:
+   - Windows 10 and 11 store the active user accent color (configured in Windows Settings -> Personalization -> Colors, or automatically computed from wallpaper by Windows) in:
+     - `HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\Accent` -> `AccentPalette` (bytes 12, 13, 14 are R, G, B of base accent color).
+     - `HKCU\Software\Microsoft\Windows\DWM` -> `AccentColor` (ABGR DWORD: 0xAABBGGRR).
+     - `HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\Accent` -> `AccentColorMenu` (ABGR DWORD).
+2. **Universal Dynamic Registry Access (`color-thief-algorithm.h`)**:
+   - Implemented `GetWindowsAccentColorFromRegistry()` using `LoadLibraryW(L"advapi32.dll")` and `RegGetValueW`.
+   - Prioritizes `AccentPalette` byte 12..14, falling back to DWM `AccentColor`, then DWM colorization, and finally MMCQ screen sampling.
+   - Dynamically resolves without requiring hard link-time dependencies for other utilities (`pin-to-top`, etc.). Added `'advapi32'` to `Libs` for `window-switcher` in `build.ps1`.
+3. **Verification**:
+   - Standalone test program verified against active Windows system configuration: returns exact `RGB(204, 77, 41)` (`#CC4D29`), identical to `Windows.UI.ViewManagement.UISettings.GetColorValue(UIColorType::Accent)`.
+   - The accent color is completely stable and no longer drifts based on background application windows.
+
+### Verification & Build
+- `pwsh -File .\build.ps1 window-switcher` -> `dist/release/window-switcher.exe` (0 errors, 0 warnings).
+- `pwsh -File .\build.ps1 -Mode debug window-switcher` -> `dist/debug/window-switcher.exe` (0 errors, 0 warnings).
+- Smoke tested single-instance IPC double-launch toggle pattern.
+
+---
+
+## 2026-09-23: Configurable Card Border Stroke Width (`window-switcher.c`)
+
+### User Request & Motivation
+- User requested: `"also add args for card border stroke width"`.
+- Enables users to customize the stroke width of the focused card border or completely disable the border (`0px`) to match their desktop aesthetic preferences.
+
+### Design & Implementation
+1. **CLI Arguments & Clean Consolidation**:
+   - User directive: `"keep stroke-width bcz bw & sw are doing same things"`.
+   - Cleanly consolidated to `--stroke-width <px>` and `-sw <px>` (with alias `--stroke`), eliminating redundant `--border-width`, `-bw`, and `-b` aliases.
+   - Range: `0..20` px (default: `1`).
+   - Supports both space-separated (`-sw 2`, `--stroke-width 3`) and equals-separated (`--stroke-width=2`, `-sw=2`) syntax.
+2. **Rendering Logic (`PaintOverlay`)**:
+   - If `strokeWidth == 0`: No border is drawn (`penWidth = 0`), resulting in completely borderless cards.
+   - If `strokeWidth == 1` (default): Draws slim 1px stroke (2px at $\ge$200% high-DPI displays).
+   - If `strokeWidth > 1`: Scales base pixel width proportionally with display DPI (`(int)(strokeWidth * scale + 0.5f)`).
+   - Border drawing and pixel opacification are strictly gated by `isSelected && penWidth > 0`.
+3. **Verification**:
+   - Built release and debug targets (`build.ps1 window-switcher`).
+   - Smoke tested:
+     - `-sw 2` successfully renders focused border with 2px stroke.
+     - `--stroke-width 0` cleanly disables border.
+     - `--stroke-width=3` parses and executes cleanly.
+     - Double-launch toggle exits running instance cleanly (`P1Exited: True, P2ExitCode: 0`).
+
+
