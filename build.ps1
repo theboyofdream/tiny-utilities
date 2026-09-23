@@ -14,6 +14,66 @@ $SRC = Join-Path $ROOT 'src'
 $DIST = Join-Path $ROOT 'dist'
 $TARGET_DIST = Join-Path $DIST $Mode.ToLower()
 
+function Ensure-ToolchainPath {
+    if ((Get-Command clang -ErrorAction SilentlyContinue) -or (Get-Command clang-cl -ErrorAction SilentlyContinue)) {
+        return
+    }
+
+    $candidateDirs = @(
+        'C:\Program Files\LLVM\bin',
+        'C:\Program Files (x86)\LLVM\bin',
+        (Join-Path $env:LOCALAPPDATA 'Programs\LLVM\bin'),
+        'C:\LLVM\bin',
+        'C:\msys64\clang64\bin',
+        'C:\msys64\ucrt64\bin',
+        'C:\msys64\mingw64\bin',
+        'C:\ProgramData\chocolatey\lib\llvm\tools\llvm\bin',
+        (Join-Path $env:USERPROFILE 'scoop\apps\llvm\current\bin'),
+        (Join-Path $env:USERPROFILE 'scoop\shims')
+    )
+
+    $vsDirs = Get-ChildItem -Path 'C:\Program Files*\Microsoft Visual Studio\*\*\VC\Tools\Llvm\x64\bin' -Directory -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName
+    if ($vsDirs) {
+        $candidateDirs += $vsDirs
+    }
+
+    foreach ($dir in $candidateDirs) {
+        if ($dir -and (Test-Path $dir)) {
+            $hasClang = (Test-Path (Join-Path $dir 'clang.exe')) -or (Test-Path (Join-Path $dir 'clang-cl.exe'))
+            if ($hasClang) {
+                Write-Host "Discovered Clang toolchain at '$dir' (added to session PATH)." -ForegroundColor DarkGray
+                $env:PATH = "$dir;$env:PATH"
+                return
+            }
+        }
+    }
+
+    $errLines = @(
+        "",
+        "=======================================================================",
+        " BUILD ERROR: Clang compiler toolchain not found",
+        "=======================================================================",
+        "Neither 'clang' nor 'clang-cl' was found in your PATH or in standard",
+        "installation directories:",
+        "  - C:\Program Files\LLVM\bin",
+        "  - Visual Studio (VC\Tools\Llvm\x64\bin)",
+        "  - MSYS2 (C:\msys64\clang64\bin, ucrt64, mingw64)",
+        "  - Scoop / Chocolatey installation paths",
+        "",
+        "To build tiny-utilities, please install LLVM Clang:",
+        "  - WinGet:      winget install LLVM.LLVM",
+        "  - Chocolatey:  choco install llvm",
+        "  - Official:    https://github.com/llvm/llvm-project/releases",
+        "",
+        "If LLVM is already installed in a custom location, add its 'bin' directory",
+        "to your system or user PATH environment variable.",
+        "======================================================================="
+    )
+    throw ($errLines -join [Environment]::NewLine)
+}
+
+Ensure-ToolchainPath
+
 # Declarative target configuration table
 $TARGET_CONFIGS = [ordered]@{
     'pin-to-top' = @{

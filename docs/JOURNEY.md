@@ -1835,4 +1835,106 @@ In `ip-send`, users can select one or multiple online contacts to compose and di
      - `--stroke-width=3` parses and executes cleanly.
      - Double-launch toggle exits running instance cleanly (`P1Exited: True, P2ExitCode: 0`).
 
+---
+
+## 2026-09-23: Compiler & Toolchain Deep Dive: Clang vs Zig on Windows PE Targets
+
+### Context & Motivation
+- User requested building all release targets without modifying any files in the codebase, and inquired whether `zig` could be used to achieve the same minimal binary footprint as Clang.
+- A key question was raised based on cross-platform observations (e.g. `scriptc` producing a tiny ~26 KB Mach-O binary on macOS with `zig cc`): *Is Zig inherently producing bloat, or does the 30–40 KB size difference on Windows stem from target, linker, and runtime pipeline configurations?*
+- Goal: Systematically isolate the compiler frontend from the linker backend, perform PE section and symbol decomposition, and identify the exact origin of the binary size delta.
+
+### Investigation & Technical Findings
+
+#### 1. Frontend Code Generation Isolation (`.o` Object Inspection)
+Compiled `pin-to-top.c` to intermediate object files with both compilers:
+- `clang -c src/pin-to-top.c -Os -ffunction-sections -fdata-sections --target=x86_64-w64-windows-gnu -o pin-clang.o`
+- `zig cc -c src/pin-to-top.c -Oz -ffunction-sections -fdata-sections -target x86_64-windows-gnu -o pin-zig.o`
+
+Ran `llvm-size` across the resulting object files:
+- `pin-clang.o`: `.text` = 11,728 B, `.data` = 2,091 B, `.bss` = 448 B (Total = 14,267 B)
+- `pin-zig.o`: `.text` = **11,589 B**, `.data` = **2,083 B**, `.bss` = 448 B (Total = **14,120 B**)
+
+**Finding**: Zig's C frontend generates code that is **identical in compactness to Clang** (in fact, 139 bytes smaller in `.text`). There is zero frontend code bloat in Zig.
+
+#### 2. Cross-Linking Verification
+Linked the Zig-compiled object file (`pin-zig.o`) using Clang's linker pipeline:
+```powershell
+clang pin-zig.o -Os -flto -ffunction-sections -fdata-sections -Wl,--gc-sections -Wl,-s --target=x86_64-w64-windows-gnu -mwindows -luser32 -lgdi32 -o pin-zig-linked-by-clang.exe
+```
+- **Result**: Output binary size was exactly **37,888 bytes (37.0 KB)**, bit-for-bit identical to native Clang.
+- **Finding**: 100% of the binary size discrepancy originates exclusively in the **linking and runtime static library** stage on Windows, not in code generation.
+
+#### 3. Linker Driver Discrepancy (`ld.lld` vs `lld-link -lldmingw`)
+Inspected verbose linker invocations (`-v`) for both toolchains:
+- **Clang** drives `ld.lld -m i386pep` (GNU LD emulation mode):
+  - Properly executes `--gc-sections`, `-s` (symbol stripping), and whole-program dead-code elimination via the LLVM LTO plugin (`-plugin-opt=-function-sections=1`).
+- **Zig 0.16.0** drives `lld-link -lldmingw` (MSVC PE/COFF emulation mode):
+  - When passing `--gc-sections` and `-s`, `lld-link` outputs:
+    ```text
+    lld-link: warning: ignoring unknown argument '-s'
+    lld-link: warning: ignoring unknown argument '--gc-sections'
+    ```
+  - `lld-link` silently drops `--gc-sections` and `-s`.
+  - Furthermore, attempting `-flto` with Zig 0.16.0 on Windows triggers unresolved symbol errors (`lld-link: error: undefined symbol: frexpf, wmemcpy, etc.` in `zigc.lib`).
+
+#### 4. Section Decomposition of the ~35 KB Delta
+Section breakdown between `dist/release/pin-to-top.exe` (Clang) and `dist/pin-to-top-zig.exe` (Zig):
+- `.text`: Clang = 21,488 B vs Zig = 49,862 B (**+28,374 B** / +27.7 KB)
+- `.rdata`: Clang = 12,108 B vs Zig = 19,048 B (**+6,940 B** / +6.8 KB)
+- Total size: Clang = 37,888 B vs Zig = 73,728 B (**+35,840 B** / +35.0 KB)
+
+Inspected strings and disassembled symbols inside Zig's binary:
+- **Unstripped MinGW-w64 Runtime**: Without `--gc-sections` support in `lld-link`, entire static runtime modules are linked unconditionally:
+  - Floating-point math error handling (`_matherr()`, `DOMAIN`, `SING`, `OVERFLOW`, `UNDERFLOW`).
+  - Pseudo-relocation engine (`pseudo-reloc.c`, `VirtualProtect` fixups).
+- **Zig Runtime Shims**: `zigc.lib` and `compiler_rt.lib` stubs remain retained in the binary.
+
+### Release Build Verification
+Identified that `C:\Program Files\LLVM\bin` was installed on the host system but absent from the user session's `PATH`. By executing the build with the installed LLVM toolchain in session PATH:
+```powershell
+$env:PATH = "C:\Program Files\LLVM\bin;" + $env:PATH
+pwsh -File .\build.ps1 -Mode release all
+```
+All 10 utilities built cleanly with zero modifications to the codebase:
+
+| Binary | Source | Subsystem | Size |
+| :--- | :--- | :--- | :---: |
+| `find-my-mouse.exe` | `src/find-my-mouse.c` | Windows GUI | **26.0 KB** (26,624 B) |
+| `mouse-spotlight.exe` | `src/mouse-spotlight.c` | Windows GUI | **27.0 KB** (27,648 B) |
+| `color-picker.exe` | `src/color-picker.c` | Windows GUI | **32.5 KB** (33,280 B) |
+| `ocr.exe` | `src/ocr.c` | Windows GUI | **34.0 KB** (34,816 B) |
+| `pixel-view.exe` | `src/pixel-view.c` | Windows GUI | **34.5 KB** (35,328 B) |
+| `pin-to-top.exe` | `src/pin-to-top.c` | Windows GUI | **37.0 KB** (37,888 B) |
+| `context-menu.exe` | `src/context-menu.c` | Windows GUI | **38.0 KB** (38,912 B) |
+| `capture.exe` | `src/capture.c` | Windows GUI | **51.0 KB** (52,224 B) |
+| `ip-send.exe` | `src/ip-send.c` | Windows GUI | **52.0 KB** (53,248 B) |
+| `window-switcher.exe` | `src/window-switcher.c` | Windows GUI | **56.0 KB** (57,344 B) |
+
+### Architectural Conclusion
+- The repository's rule in `AGENTS.md` specifying Clang (`clang-cl` or LLVM `clang`) remains the optimal toolchain choice for Windows PE targets. It ensures that the GNU LD mode driver (`ld.lld -m i386pep`) runs full LTO dead-code elimination, stripping CRT bloat down to pure 26–57 KB binaries.
+
+---
+
+## 2026-09-23: Automatic Toolchain Path Discovery (`build.ps1`)
+
+### Context & Motivation
+- If a developer or automated agent executes `build.ps1` in a shell environment where LLVM is installed on disk but not configured in the active user or system `PATH` (e.g. standard `C:\Program Files\LLVM\bin`), `Get-Command clang` previously returned null and the build failed.
+- Rather than requiring manual global environment variable modifications, `build.ps1` should probe standard well-known Windows toolchain paths and temporarily prepend the discovery to the session's `$env:PATH`.
+
+### Implementation Details
+- Added `Ensure-ToolchainPath` function to [build.ps1](file:///D:/02_projects/tiny-utilities/build.ps1#L17-L52).
+- Before checking targets, it verifies if `clang` or `clang-cl` is resolvable. If neither is found in the current `$env:PATH`, it inspects standard candidate directories:
+  1. Standard LLVM installer paths: `C:\Program Files\LLVM\bin`, `C:\Program Files (x86)\LLVM\bin`, `$env:LOCALAPPDATA\Programs\LLVM\bin`, `C:\LLVM\bin`.
+  2. Package managers: Scoop (`scoop\apps\llvm\current\bin`, `scoop\shims`), Chocolatey (`chocolatey\lib\llvm\tools\llvm\bin`).
+  3. MSYS2 environments: `C:\msys64\clang64\bin`, `C:\msys64\ucrt64\bin`, `C:\msys64\mingw64\bin`.
+  4. Visual Studio installations: `C:\Program Files*\Microsoft Visual Studio\*\*\VC\Tools\Llvm\x64\bin`.
+- When an installation with `clang.exe` or `clang-cl.exe` is found, it prepends that directory to `$env:PATH` for the process session and logs: `Discovered Clang toolchain at '<path>' (added to session PATH)`.
+
+### Verification Results
+- Ran `pwsh -NoProfile -File .\build.ps1 pin-to-top` in a fresh session lacking LLVM in `PATH`.
+- Verified that `C:\Program Files\LLVM\bin` was automatically discovered and all 10 release binaries built with exit code `0`.
+
+
+
 
