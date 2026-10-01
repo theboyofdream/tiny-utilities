@@ -1935,6 +1935,77 @@ All 10 utilities built cleanly with zero modifications to the codebase:
 - Ran `pwsh -NoProfile -File .\build.ps1 pin-to-top` in a fresh session lacking LLVM in `PATH`.
 - Verified that `C:\Program Files\LLVM\bin` was automatically discovered and all 10 release binaries built with exit code `0`.
 
+---
 
+## 2026-10-01: Fix Fast Alt+Tab Focus Switching & Taskbar Icon Blinking (`window-switcher.c`)
 
+### User Request & Problem Statement
+- User reported: `"window-switcher doesn't switch windows when i press alt tab very fast. the icon in taskbar starts blinking but window is still not change"`.
+- When tapping Alt+Tab rapidly (releasing Alt in tens of milliseconds), `window-switcher` was triggered, but the target window failed to come to the foreground. Instead, its taskbar icon flashed/blinked while focus remained stuck on the previous window.
 
+### Root Cause Analysis
+1. **Windows Foreground Lock & `SetForegroundWindow` Restriction**:
+   - Windows restricts background processes from stealing focus. Under Win32 rules, if the calling process is not the active foreground process and has not received direct user input events, `SetForegroundWindow` fails (returns `FALSE`).
+   - Per Windows documentation, whenever `SetForegroundWindow` is denied, Windows flashes/blinks the window's button on the taskbar instead of activating it.
+2. **Defective `AttachThreadInput` Strategy**:
+   - `ActivateWindow` was previously calling `AttachThreadInput(currentThread, targetThread, TRUE)`.
+   - When the user presses Alt+Tab very fast, `window-switcher.exe` is launched as a background child process by AutoHotkey (`shortcuts.ahk`). Because Alt was released quickly, `window-switcher.exe` never became the true foreground process—the original application (e.g. Chrome, VS Code) retained foreground rights.
+   - Attaching `currentThread` (the background switcher) to `targetThread` (the background target window) attached two background threads together—neither possessed foreground rights. As a result, `SetForegroundWindow(hwnd)` was rejected by the OS.
+3. **Overlay Focus Loss & Rapid Re-invocation**:
+   - `g_hwndOverlay` was created with `WS_EX_TOPMOST` but was calling `SetForegroundWindow(g_hwndOverlay)` without foreground thread attachment, leaving it vulnerable to not actually acquiring foreground focus upon startup.
+   - If the user rapidly tapped Alt+Tab repeatedly, the IPC loop at line 2058 checked `if (IsAltKeyDown())`. If Alt had already been released between quick taps, the switcher treated the second invocation as a dismiss signal (`break;`) rather than cycling to the next window.
+
+### Design Decisions & Implementation
+1. **Window Size & Geometry Preservation**:
+   - **Eliminated Cross-Thread `AttachThreadInput` to Target**: `window-switcher` runs with `DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2`. Attaching its message queue to target applications (`targetThread`) that have different DPI contexts caused Windows to dispatch cross-thread `WM_DPICHANGED` and `WM_WINDOWPOSCHANGING` messages to the target window, modifying its physical dimensions on screen. Cross-thread attachment to `targetThread` was completely removed.
+   - **Eliminated `SetWindowPos(SWP_SHOWWINDOW)` and `SwitchToThisWindow`**: These APIs forced window layout recalculations that un-maximized windows and stripped Windows Snap Assist layouts (snapped left/right half-screens).
+   - **Guarded `ShowWindow` on Visible Windows**: `ShowWindow` is strictly bypassed for windows that are already visible (`!IsIconic(hwnd)`). Their size, position, and snap layout remain 100% untouched.
+   - **`WPF_RESTORETOMAXIMIZED` Support for Iconic Windows**: When restoring genuinely minimized windows, queries `GetWindowPlacement` and checks `wp.flags & WPF_RESTORETOMAXIMIZED`, calling `ShowWindow(hwnd, SW_SHOWMAXIMIZED)` to ensure maximized windows do not revert to floating windows.
+2. **Clean Foreground Focus Without Geometry Disruption**:
+   - Clears OS `ForegroundLockTimeout` using simulated Alt-key synthesis (`keybd_event(VK_MENU, ...)` down & up) without modifying any window coordinates.
+   - Calls `BringWindowToTop(hwnd)` and `SetForegroundWindow(hwnd)`.
+   - Uses attachment strictly to `foreThread` as a non-invasive fallback only if foreground transfer is resisted.
+3. **Immediate Overlay Hiding & Guard Flag**:
+   - `ActivateWindow` hides `g_hwndOverlay` (`ShowWindow(g_hwndOverlay, SW_HIDE)`) immediately upon activation so that the topmost switcher overlay cannot obstruct or occlude the target window.
+   - Added `g_isActivating` flag so `WM_ACTIVATE` (`WA_INACTIVE`) does not cancel the switch or post premature quit messages during activation.
+4. **Fast Repeated Alt+Tab Handling**:
+   - In the IPC event loop, updated `waitRes == WAIT_OBJECT_0` to check `if (IsAltKeyDown() || (GetTickCount64() - g_startTime < 800))`. Rapid double/triple Alt+Tab taps advance the selection (`HandleTab`) rather than immediately dismissing.
+5. **Deployment to AutoHotkey Directory**:
+   - Copied the compiled `dist/release/window-switcher.exe` to `C:\Users\abhishek.c\Documents\AutoHotkey\window-switcher.exe`, directly updating the binary used by the active `shortcuts.ahk` configuration.
+
+### Verification
+- Built release and debug binaries: `pwsh -File .\build.ps1 window-switcher` and `pwsh -File .\build.ps1 -Mode debug window-switcher` (0 errors, 0 warnings).
+- Smoke tested double-launch toggle IPC pattern (`dist/release/window-switcher.exe`).
+- Verified binary in user's AutoHotkey directory is up-to-date.
+
+---
+
+## 2026-10-01: Fix Premature Dismissal While Holding Alt Key (`window-switcher.c`)
+
+### User Request & Problem Statement
+- User reported: `"when i kept alt button pressed the app disapear"`.
+- When invoking the switcher via `Alt+Tab` and holding the physical `Alt` key down, the overlay switcher appeared but automatically closed/disappeared after ~300 ms, switching windows prematurely even though the user intended to keep browsing the window list.
+
+### Root Cause Analysis
+1. **Startup Synthetic `keybd_event(VK_MENU, ...)` Injection**:
+   - In an earlier attempt to break OS foreground locks, `keybd_event(VK_MENU, 0, KEYEVENTF_KEYUP, 0)` had been placed in `wWinMain` right before window creation.
+2. **Low-Level Hook & Asynchronous Key State Collision**:
+   - The low-level keyboard hook (`LowLevelKeyboardProc`) was already active or intercepted the synthetic key event generated by `keybd_event`. The hook caught the simulated `VK_MENU` key-up event and posted `WM_SWITCHER_ALT_UP` to `g_hwndOverlay`.
+   - `HandleAltUp` interpreted this message as the user having released `Alt`, scheduling the 300 ms `TIMER_AUTO_ACTIVATE` countdown timer.
+   - Concurrently, injecting `KEYEVENTF_KEYUP` into the Windows input queue updated Windows' asynchronous key table (`GetAsyncKeyState(VK_MENU)`), clearing the high-order bit (`0x8000`).
+   - When the 300 ms timer expired, `WM_TIMER` checked `IsAltKeyDown()`: because the synthetic keyup had reset the key state, `IsAltKeyDown()` returned `false`. Consequently, `ActivateWindow` was called and `PostQuitMessage(0)` terminated the switcher overlay after exactly 300 ms.
+
+### Design Decisions & Implementation
+1. **Removed Synthetic Alt Keyup from Startup**:
+   - Completely removed `keybd_event(VK_MENU, 0, KEYEVENTF_KEYUP, 0)` from `wWinMain`.
+   - Replaced it with clean Win32 foreground acquisition routines (`LockSetForegroundWindow(LSFW_UNLOCK)`, `AllowSetForegroundWindow(ASFW_ANY)`, `BringWindowToTop`, `SetForegroundWindow`, `SetActiveWindow`, `SetFocus`), which safely acquire foreground without polluting the input queue.
+2. **Strictly Confined Foreground Lock Bypass to Window Activation**:
+   - The synthetic `keybd_event` technique is only needed and executed inside `ActivateWindow()` at the precise moment when the user commits to switching away to the target window and the switcher is quitting.
+3. **Preserved Alt Hold & Timer Pause Architecture**:
+   - With the input queue unpolluted, `IsAltKeyDown()` correctly detects the physical Alt key state throughout the session.
+   - While Alt is held down, auto-activation remains paused, allowing the user to inspect cards and cycle through windows (`Tab`, arrows, or hint shortcuts) for as long as desired. Releasing Alt properly begins the commit timer as intended.
+
+### Verification
+- Compiled release build via `pwsh -File .\build.ps1 -Mode release window-switcher`.
+- Deployed binary to `C:\Users\abhishek.c\Documents\AutoHotkey\window-switcher.exe`.
+- Confirmed that double-launch toggle contracts exit cleanly with code 0.

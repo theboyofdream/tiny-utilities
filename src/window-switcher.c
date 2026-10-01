@@ -45,6 +45,16 @@
 
 WINUSERAPI BOOL WINAPI EndTask(HWND hWnd, BOOL fShutDown, BOOL fForce);
 
+#ifndef LSFW_UNLOCK
+#define LSFW_UNLOCK 2
+#endif
+#ifndef ASFW_ANY
+#define ASFW_ANY ((DWORD)-1)
+#endif
+#ifndef WPF_RESTORETOMAXIMIZED
+#define WPF_RESTORETOMAXIMIZED 0x0002
+#endif
+
 #define APPMUTEX_NAME L"Global\\TinyWindowSwitcherMutex"
 #define APPEVENT_NAME L"Global\\TinyWindowSwitcherEvent"
 
@@ -127,6 +137,9 @@ static int          g_typedLen = 0;
 static int          g_layoutCols = 4;
 
 static HWND         g_hwndOverlay = NULL;
+static HWND         g_hInitialForeground = NULL;
+static bool         g_isActivating = false;
+static ULONGLONG    g_startTime = 0;
 static HFONT        g_hFontHint = NULL;
 static HFONT        g_hFontHintLarge = NULL;
 static HFONT        g_hFontTitle = NULL;
@@ -621,20 +634,60 @@ static void ComputeAppHints(void) {
 
 /* --- Window Activation --- */
 static void ActivateWindow(HWND hwnd) {
-    if (!IsWindow(hwnd)) return;
+    if (!hwnd || !IsWindow(hwnd)) return;
 
-    if (IsIconic(hwnd)) {
-        ShowWindow(hwnd, SW_RESTORE);
+    HWND hCurFore = GetForegroundWindow();
+    if (hCurFore == hwnd) {
+        return;
     }
 
-    /* Force foreground switch */
-    DWORD currentThread = GetCurrentThreadId();
-    DWORD targetThread = GetWindowThreadProcessId(hwnd, NULL);
+    g_isActivating = true;
 
-    AttachThreadInput(currentThread, targetThread, TRUE);
+    /* Hide the overlay immediately so it does not block the target window */
+    if (g_hwndOverlay && IsWindow(g_hwndOverlay)) {
+        ShowWindow(g_hwndOverlay, SW_HIDE);
+    }
+
+    /* Only restore minimized (iconic) windows, preserving maximized vs normal state.
+       Never call ShowWindow on already visible windows as it resets snap/maximized layouts! */
+    if (IsIconic(hwnd)) {
+        WINDOWPLACEMENT wp = { sizeof(wp) };
+        if (GetWindowPlacement(hwnd, &wp) && (wp.flags & WPF_RESTORETOMAXIMIZED)) {
+            ShowWindow(hwnd, SW_SHOWMAXIMIZED);
+        } else {
+            ShowWindow(hwnd, SW_RESTORE);
+        }
+    }
+
+    /* 1. Unlock foreground and allow any process to set foreground */
+    LockSetForegroundWindow(LSFW_UNLOCK);
+    AllowSetForegroundWindow(ASFW_ANY);
+
+    /* 2. Clear OS ForegroundLockTimeout via simulated Alt key without attaching threads */
+    keybd_event(VK_MENU, 0, 0, 0);
+    keybd_event(VK_MENU, 0, KEYEVENTF_KEYUP, 0);
+
+    /* 3. Bring target window to top and set foreground without modifying window geometry */
     BringWindowToTop(hwnd);
     SetForegroundWindow(hwnd);
-    AttachThreadInput(currentThread, targetThread, FALSE);
+
+    /* 4. If target is still not foreground, attach ONLY to the active foreground thread as fallback.
+          NEVER attach to targetThread, as cross-thread DPI awareness causes target window resizing! */
+    if (GetForegroundWindow() != hwnd) {
+        DWORD curThread = GetCurrentThreadId();
+        DWORD foreThread = hCurFore ? GetWindowThreadProcessId(hCurFore, NULL) : 0;
+        if (foreThread == 0 || foreThread == curThread) {
+            if (g_hInitialForeground && IsWindow(g_hInitialForeground)) {
+                foreThread = GetWindowThreadProcessId(g_hInitialForeground, NULL);
+            }
+        }
+        if (foreThread && foreThread != curThread) {
+            AttachThreadInput(curThread, foreThread, TRUE);
+            BringWindowToTop(hwnd);
+            SetForegroundWindow(hwnd);
+            AttachThreadInput(curThread, foreThread, FALSE);
+        }
+    }
 }
 
 /* --- Cleanup Thumbnails --- */
@@ -1475,7 +1528,6 @@ static LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lP
 
 /* --- Overlay Window Procedure --- */
 static LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
-    static ULONGLONG g_startTime = 0;
     static ULONGLONG g_lastCloseTime = 0;
     static bool      g_hasBeenActivated = false;
 
@@ -1484,6 +1536,7 @@ static LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
         g_startTime        = GetTickCount64();
         g_lastCloseTime    = 0;
         g_hasBeenActivated = false;
+        g_isActivating     = false;
         UpdateFontsForDpi(96);
         return 0;
 
@@ -1748,6 +1801,9 @@ static LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
         if (activeState == WA_ACTIVE || activeState == WA_CLICKACTIVE) {
             g_hasBeenActivated = true;
         } else if (activeState == WA_INACTIVE) {
+            if (g_isActivating) {
+                return 0;
+            }
             if (GetTickCount64() - g_lastCloseTime < 600) {
                 /* Window just closed in background; reclaim focus and keep overlay open */
                 SetForegroundWindow(hwnd);
@@ -1953,6 +2009,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR lpCmdLin
         HWND hRoot = GetAncestor(hForeground, GA_ROOT);
         if (hRoot) hForeground = hRoot;
     }
+    g_hInitialForeground = hForeground;
 
     /* Detect if Alt key is currently held down when launched, or if explicitly requested via CLI */
     g_altTabMode = IsAltKeyDown() || g_cfg.altTab;
@@ -2034,7 +2091,14 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR lpCmdLin
     ApplyBackgroundComposition(g_hwndOverlay);
 
     ComputeLayout(g_hwndOverlay, &overlayW, &overlayH);
+
+    /* Ensure overlay window reliably acquires foreground focus upon creation */
+    LockSetForegroundWindow(LSFW_UNLOCK);
+    AllowSetForegroundWindow(ASFW_ANY);
+    BringWindowToTop(g_hwndOverlay);
     SetForegroundWindow(g_hwndOverlay);
+    SetActiveWindow(g_hwndOverlay);
+    SetFocus(g_hwndOverlay);
 
     /* In recent (MRU) mode, Alt+Tab mode, or with --alt-tab flag, default selection is the second item (previous window) */
     if ((g_altTabMode || g_cfg.sort == SORT_RECENT || g_cfg.altTab) && g_itemCount > 1) {
@@ -2055,12 +2119,12 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR lpCmdLin
     while (1) {
         DWORD waitRes = MsgWaitForMultipleObjectsEx(1, &hEvent, INFINITE, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
         if (waitRes == WAIT_OBJECT_0) {
-            if (IsAltKeyDown()) {
-                /* Alt is held: treat IPC toggle as Tab / advance selection */
+            if (IsAltKeyDown() || (GetTickCount64() - g_startTime < 800)) {
+                /* Alt is held or rapid toggle: treat IPC toggle as Tab / advance selection */
                 HandleTab(g_hwndOverlay, (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0);
                 continue;
             }
-            /* Alt is not held -> user explicitly launched toggle to dismiss */
+            /* Alt is not held and not rapid toggle -> user explicitly launched toggle to dismiss */
             break;
         }
 
