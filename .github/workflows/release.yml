@@ -1,5 +1,8 @@
 name: Release
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 on:
   push:
     branches:
@@ -92,6 +95,7 @@ jobs:
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
         run: |
           # Determine release tag: manual input > VERSION file > fallback
           $tag = '${{ github.event.inputs.tag_name }}'
@@ -101,7 +105,7 @@ jobs:
           if (-not $tag) { $tag = '${{ github.ref_name }}' }
           if (-not $tag -or $tag -eq 'release' -or $tag -eq 'master') { $tag = "v1.0.0" }
 
-          Write-Host "Publishing release for tag: $tag"
+          Write-Host "Publishing release for tag: $tag (Repository: ${{ github.repository }})"
           $assets = Get-ChildItem -Path release-assets -File | Where-Object { $_.Name -ne 'VERSION' } | ForEach-Object { $_.FullName }
 
           # Check if release already exists using LASTEXITCODE
@@ -116,7 +120,7 @@ jobs:
           }
 
           if (-not $releaseExists) {
-              Write-Host "Creating new release $tag..."
+              Write-Host "Creating new release $tag on ${{ github.ref_name }}..."
               & gh release create $tag @targetArgs `
                   --title "Tiny Windows Utilities $tag" `
                   --generate-notes
@@ -124,5 +128,9 @@ jobs:
               Write-Host "Release $tag already exists."
           }
 
-          Write-Host "Uploading assets to release $tag..."
-          & gh release upload $tag @assets --clobber
+          Write-Host "Uploading $($assets.Count) assets to release $tag..."
+          foreach ($file in $assets) {
+              $fileName = [System.IO.Path]::GetFileName($file)
+              Write-Host "  -> Uploading $fileName"
+              & gh release upload $tag $file --clobber
+          }
