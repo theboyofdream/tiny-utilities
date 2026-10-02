@@ -29,7 +29,7 @@ jobs:
 
     steps:
       - name: Checkout Code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
@@ -70,7 +70,7 @@ jobs:
           Set-Content -Path "$pkgDir\VERSION" -Value $verTag
 
       - name: Upload Artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: release-${{ matrix.arch }}
           path: dist/packages/${{ matrix.arch }}/*
@@ -82,7 +82,7 @@ jobs:
     runs-on: windows-latest
     steps:
       - name: Download All Artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: release-assets
           pattern: release-*
@@ -104,20 +104,25 @@ jobs:
           Write-Host "Publishing release for tag: $tag"
           $assets = Get-ChildItem -Path release-assets -File | Where-Object { $_.Name -ne 'VERSION' } | ForEach-Object { $_.FullName }
 
-          # Check if release already exists
-          $releaseExists = $false
-          try {
-              gh release view $tag --json id | Out-Null
-              $releaseExists = $true
-          } catch {}
+          # Check if release already exists using LASTEXITCODE
+          $ErrorActionPreference = 'Continue'
+          & gh release view $tag --json id 2>$null | Out-Null
+          $releaseExists = ($LASTEXITCODE -eq 0)
+          $ErrorActionPreference = 'Stop'
 
-          if ($releaseExists) {
-              Write-Host "Release $tag already exists. Uploading assets..."
-              gh release upload $tag $assets --clobber
-          } else {
-              Write-Host "Creating new release $tag on branch release..."
-              gh release create $tag $assets `
-                  --target '${{ github.ref_name }}' `
+          $targetArgs = @()
+          if ('${{ github.ref_name }}' -and -not '${{ github.ref_name }}'.StartsWith('v')) {
+              $targetArgs = @('--target', '${{ github.ref_name }}')
+          }
+
+          if (-not $releaseExists) {
+              Write-Host "Creating new release $tag..."
+              & gh release create $tag @targetArgs `
                   --title "Tiny Windows Utilities $tag" `
                   --generate-notes
+          } else {
+              Write-Host "Release $tag already exists."
           }
+
+          Write-Host "Uploading assets to release $tag..."
+          & gh release upload $tag @assets --clobber
