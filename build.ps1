@@ -210,6 +210,7 @@ function Build-Target([string]$TargetName, [string]$BuildMode, [string]$BuildArc
                 $srcFile,
                 "--target=$targetTripleMSVC",
                 '/O1',
+                '/MD',
                 '/Gy',
                 '/Gw',
                 '/link'

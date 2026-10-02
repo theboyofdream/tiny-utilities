@@ -75,6 +75,39 @@ jobs:
           tag_name: ${{ env.RELEASE_TAG }}
           target_commitish: ${{ github.ref_name }}
           name: Tiny Windows Utilities ${{ env.RELEASE_TAG }}
+          body: |
+            ## ⚡ Tiny Windows Utilities ${{ env.RELEASE_TAG }}
+
+            Hyper-focused, native Win32 C & GDI productivity utilities for Windows power users with **zero background footprint when idle**.
+
+            ### 📦 Quick Start
+            1. Download **`tiny-utilities-x64.zip`** (or **`tiny-utilities-arm64.zip`** for ARM devices).
+            2. Extract the archive into a folder of your choice.
+            3. Run **`shortcuts.ahk`** (requires [AutoHotkey v2](https://www.autohotkey.com/)) or launch any `.exe` directly!
+
+            ---
+
+            ### 🛠️ Included Utilities
+
+            | Utility | Binary | Description | Default Shortcut |
+            | :--- | :--- | :--- | :--- |
+            | **Pin to Top** | `pin-to-top.exe` | Pin active window topmost with accent border | `Win + Ctrl + T` |
+            | **Window Switcher** | `window-switcher.exe` | 1-key direct hint badge Alt+Tab replacement | `Alt + Tab` |
+            | **Mouse Spotlight** | `mouse-spotlight.exe` | Darkens screen with focus circle around cursor | Double-tap `Ctrl` |
+            | **Find My Mouse** | `find-my-mouse.exe` | Concentric radar pulse cursor locator | Double-tap `Ctrl` |
+            | **Color Picker** | `color-picker.exe` | Instant magnifier with HEX, RGB, HSL, CMYK copy | `Win + Shift + C` |
+            | **Capture** | `capture.exe` | Instant region snip, active window, and annotations | `Win + Shift + S` |
+            | **Pixel View** | `pixel-view.exe` | Retro nearest-neighbor 1:1 image & animated GIF viewer | CLI / Explorer |
+            | **IP Send** | `ip-send.exe` | Lightweight dispatcher for IP Messenger | Explorer / Context Menu |
+            | **Context Menu** | `context-menu.exe` | Per-user Explorer context menu manager via XML | CLI / GUI |
+            | **OCR** | `ocr.exe` | Ultra-portable command-line OCR text extractor | CLI |
+
+            ---
+
+            ### 💎 Highlights
+            - **Ultra-Tiny Footprint**: Built with dynamic Windows Universal CRT linking (`/MD`). Executables are just **~16–50 KB** each!
+            - **Native Dual Architecture**: First-class support for both **x64** and **arm64** (Surface Pro, Qualcomm Snapdragon X Elite).
+            - **Agent-Proof & Ephemeral**: Zero background services, zero telemetry, instant double-launch toggle-off.
           files: |
             release-assets/*.exe
             release-assets/*.zip

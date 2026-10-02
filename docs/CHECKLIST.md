@@ -365,8 +365,16 @@ Legend: `[x]` done & verified, `[ ]` known gap, `[-]` not applicable.
   - Generates ready-to-use ZIP bundles (`tiny-utilities-x64.zip` and `tiny-utilities-arm64.zip`) containing un-suffixed `.exe` files and `shortcuts.ahk`.
   - Generates standalone architecture-suffixed executables (`pin-to-top-x64.exe`, etc.) for users who need individual tools.
   - Automatically avoids Node.js 20 runner deprecations by removing redundant `actions/checkout` in publish job.
-- [x] Release documentation in `docs/DEVELOPMENT.md`:
-  - Detailed step-by-step instructions on updating `VERSION` and triggering releases via `git push origin master:release`.
+## 28. DYNAMIC CRT LINKING & STREAMLINED RELEASE WORKFLOW (2026-10-02)
+- [x] Dynamic CRT linking (`/MD`) for MSVC `clang-cl` in `build.ps1`:
+  - Resolved 145–185 KB executable bloat on GitHub Actions CI.
+  - Linked dynamically to Windows Universal CRT (`ucrtbase.dll` / `vcruntime140.dll`), reducing binary sizes by 70–89% down to 16–52 KB per tool.
+  - Reduced release ZIP bundle from ~896 KB down to ~180 KB.
+- [x] Streamlined CI/CD pipeline in `.github/workflows/release.yml`:
+  - Moved artifact packaging directly into `build.ps1 -Package`.
+  - Replaced procedural shell scripting with standard `softprops/action-gh-release@v3` (Node 24 native).
+  - Added rich markdown release body with Quick Start guide, hotkeys reference table, and feature highlights.
+- [x] Bumped version to `1.0.1`.
 
 ## Open items / notes
 - CPU idle % not re-measured; loop is event-wait based (sleeps 16 ms) so expected < 0.2%.

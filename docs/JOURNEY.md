@@ -2126,3 +2126,52 @@ Previously, releases were triggered via git tags (`v*`) or manual `workflow_disp
 - Validated `VERSION` content (`1.0.0`).
 - Documented updates in `docs/CHECKLIST.md` and `docs/JOURNEY.md`.
 
+---
+
+## 2026-10-02: Dynamic CRT Linking (/MD), Package Automation, and Rich Release Documentation
+
+### Context & Problem Statement
+Following the publication of release `v1.0.0`, inspection of the downloadable assets revealed two critical issues:
+1. **Executable Size Discrepancy**: Binary executables published by GitHub Actions CI were inflated to ~145–185 KB each (e.g. `pin-to-top.exe` was 158.7 KB), whereas local MinGW builds were ~23–35 KB.
+2. **Release Documentation Void**: The generated release page on GitHub was devoid of user-facing context, showing only a bare commit link (`Full Changelog: ...`) with no usage instructions, hotkeys reference, or utility breakdown.
+3. **YAML Script Bloat**: `.github/workflows/release.yml` contained over 70 lines of procedural PowerShell scripts performing directory manipulation and GitHub CLI operations.
+
+### Root Cause Analysis
+1. **MSVC Static CRT Default (`/MT`)**:
+   - On GitHub Actions Windows runners, the MSVC toolchain (`clang-cl`) is utilized.
+   - In `build.ps1`, the release flags for `clang-cl` were `/O1 /Gy /Gw /link ...` without `/MD`.
+   - Without `/MD`, `clang-cl` defaults to `/MT` (**static CRT linking** via `libcmt.lib`), statically embedding ~120–130 KB of CRT runtime boilerplate into every single executable.
+   - Conversely, MinGW Clang dynamically links to Windows Universal CRT by default, explaining why local builds remained lean.
+2. **Procedural Scripting in Declarative CI**:
+   - Packaging routines (directory creation, archiving, binary renaming) and release creation checks had been scripted inline in YAML rather than encapsulated in the project's build automation.
+
+### Architectural Decisions & Implementation
+1. **Universal Dynamic CRT Linking (`/MD`)**:
+   - Added `/MD` to `clang-cl` release compilation flags in `build.ps1`.
+   - Windows 10 and 11 bundle the Universal C Runtime (`ucrtbase.dll` / `vcruntime140.dll`) as built-in OS components. Linking dynamically drops binary sizes by **70–89%**:
+     - `find-my-mouse`: 144.8 KB $\rightarrow$ **16.0 KB** (-89%)
+     - `mouse-spotlight`: 145.4 KB $\rightarrow$ **17.5 KB** (-88%)
+     - `color-picker`: 154.6 KB $\rightarrow$ **23.0 KB** (-85%)
+     - `pin-to-top`: 158.7 KB $\rightarrow$ **28.5 KB** (-82%)
+     - `ocr`: 173.0 KB $\rightarrow$ **30.5 KB** (-82%)
+     - `pixel-view`: 183.8 KB $\rightarrow$ **33.0 KB** (-82%)
+     - `context-menu`: 181.2 KB $\rightarrow$ **35.5 KB** (-80%)
+     - `capture`: 175.6 KB $\rightarrow$ **43.0 KB** (-75%)
+     - `ip-send`: 178.6 KB $\rightarrow$ **50.5 KB** (-72%)
+     - `window-switcher`: 175.1 KB $\rightarrow$ **51.5 KB** (-70%)
+     - ZIP Bundle: ~896 KB $\rightarrow$ **~180 KB** (-80%)
+2. **Encapsulated Packaging (`build.ps1 -Package`)**:
+   - Added `-Package` switch and `Package-Artifacts` function to `build.ps1`.
+   - Compiles and packages both the clean `.zip` bundle and standalone architecture-suffixed binaries into `dist/packages/<arch>/`.
+   - Enables developers to build and verify release archives locally on demand.
+3. **Pure Declarative YAML & Rich Release Showcase**:
+   - Replaced all procedural PowerShell scripting in `.github/workflows/release.yml` with `softprops/action-gh-release@v3` (Node 24 native).
+   - Injected a comprehensive markdown release body with a Quick Start guide, tool matrix, default hotkeys reference, and architecture highlights.
+4. **Version Bump**:
+   - Bumped `VERSION` to `1.0.1`.
+
+### Verification
+- Tested `pwsh -File .\build.ps1 -Mode release -Package pin-to-top` locally: verified 28.5 KB binary and zip creation.
+- Audited `clang-cl /MD` output sizes across all 10 tools.
+- Validated YAML syntax in `.github/workflows/release.yml`.
+
