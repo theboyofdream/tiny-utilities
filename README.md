@@ -8,6 +8,19 @@ An ultra-lightweight, high-performance suite of native **Win32 C & GDI** utiliti
 
 ---
 
+## 📦 Downloads & Releases
+
+Precompiled standalone executables are automatically built and published via GitHub Releases for both **x64 (Intel/AMD)** and **native ARM64 (Surface / Snapdragon X Elite)**:
+
+| Package | Architecture | Direct Download | Included Contents |
+| :--- | :--- | :--- | :--- |
+| **All Tools (Bundle)** | **x64** (Intel / AMD) | [⬇️ `tiny-utilities-x64.zip`](https://github.com/theboyofdream/tiny-utilities/releases/latest/download/tiny-utilities-x64.zip) | All 10 `.exe` binaries + `shortcuts.ahk` |
+| **All Tools (Bundle)** | **ARM64** (Snapdragon / Surface) | [⬇️ `tiny-utilities-arm64.zip`](https://github.com/theboyofdream/tiny-utilities/releases/latest/download/tiny-utilities-arm64.zip) | All 10 ARM64 `.exe` binaries + `shortcuts.ahk` |
+
+*You can also download individual standalone `.exe` files or source code archives directly from the [Latest GitHub Release](https://github.com/theboyofdream/tiny-utilities/releases/latest).*
+
+---
+
 ## 🛠️ The Utilities Suite
 
 Every utility runs as an independent, single-instance executable with instant hotkey toggling:

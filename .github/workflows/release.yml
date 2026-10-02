@@ -1,0 +1,114 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: 'Release tag (e.g. v1.0.0)'
+        required: false
+        default: 'v1.0.0'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build (${{ matrix.arch }})
+    runs-on: windows-latest
+    strategy:
+      matrix:
+        include:
+          - arch: x64
+            msvc_arch: x64
+          - arch: arm64
+            msvc_arch: x64_arm64
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup MSVC & Clang Toolchain (${{ matrix.arch }})
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: ${{ matrix.msvc_arch }}
+
+      - name: Build All Utilities (${{ matrix.arch }})
+        shell: pwsh
+        run: |
+          $arch = '${{ matrix.arch }}'
+          Write-Host "Building all utilities for $arch..."
+          pwsh -File .\build.ps1 -Mode release -Arch $arch all
+
+          # Locate compiled binaries
+          $srcDir = if ($arch -eq 'arm64') { "dist\release\arm64" } else { "dist\release" }
+          $pkgDir = "dist\packages\$arch"
+          New-Item -ItemType Directory -Path $pkgDir -Force | Out-Null
+
+          # 1. Clean bundle folder for all-in-one ZIP (clean filenames without arch suffix so shortcuts.ahk works)
+          $bundleDir = "dist\bundle\$arch"
+          New-Item -ItemType Directory -Path $bundleDir -Force | Out-Null
+          Get-ChildItem -Path $srcDir -Filter "*.exe" | ForEach-Object {
+              Copy-Item $_.FullName "$bundleDir\$($_.Name)"
+          }
+          Copy-Item docs\shortcuts.ahk "$bundleDir\shortcuts.ahk"
+          Compress-Archive -Path "$bundleDir\*" -DestinationPath "$pkgDir\tiny-utilities-$arch.zip"
+
+          # 2. Individual standalone executables with arch suffix for single-file downloads
+          Get-ChildItem -Path $srcDir -Filter "*.exe" | ForEach-Object {
+              Copy-Item $_.FullName "$pkgDir\$($_.BaseName)-$arch.exe"
+          }
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.arch }}
+          path: dist/packages/${{ matrix.arch }}/*
+          retention-days: 1
+
+  publish:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: windows-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Download All Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          pattern: release-*
+          merge-multiple: true
+
+      - name: Create GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $tag = '${{ github.event.inputs.tag_name }}'
+          if (-not $tag) { $tag = '${{ github.ref_name }}' }
+          if (-not $tag -or $tag -eq 'master') { $tag = "v1.0.0" }
+
+          Write-Host "Publishing release for tag: $tag"
+          $assets = Get-ChildItem -Path release-assets -File | ForEach-Object { $_.FullName }
+
+          $releaseExists = $false
+          try {
+              gh release view $tag --json id | Out-Null
+              $releaseExists = $true
+          } catch {}
+
+          if ($releaseExists) {
+              Write-Host "Release $tag already exists. Uploading assets..."
+              gh release upload $tag $assets --clobber
+          } else {
+              Write-Host "Creating new release $tag..."
+              gh release create $tag $assets `
+                  --title "Tiny Windows Utilities $tag" `
+                  --generate-notes
+          }
