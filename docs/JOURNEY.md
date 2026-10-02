@@ -2095,3 +2095,34 @@ Following rapid feature development across all 10 tools, the project documentati
   - `ip-send` (17 lines, exit code 0)
   - `capture` (19 lines, exit code 0)
 
+---
+
+## 2026-10-02: Dedicated Release Branch, Single-Source VERSION File, and Archive Packaging
+
+### Context & Goal
+Previously, releases were triggered via git tags (`v*`) or manual `workflow_dispatch`. The user requested establishing a dedicated `release` branch trigger, allowing standard git branch pushes to trigger release builds. Additionally, the user requested bundling all executables and AutoHotkey configuration into ZIP archives for end-users alongside standalone `.exe` downloads, while keeping version numbers transparent via a root `VERSION` file.
+
+### Architectural Decisions & Implementation
+
+1. **Release Branch Trigger & Workflow Modernization (`.github/workflows/release.yml`)**:
+   - Added `release` branch to the `push.branches` trigger alongside existing `v*` tag triggers and manual `workflow_dispatch`.
+   - Removed redundant `actions/checkout@v4` in the `publish` job, eliminating unnecessary GitHub Actions runner overhead and resolving Node.js 20 deprecation warnings on GitHub Actions.
+   - Preserved `GH_TOKEN` authorization using standard `gh` CLI inside the GitHub Actions runner.
+
+2. **Single-Source `VERSION` File Pattern**:
+   - Created `VERSION` in the repository root containing `1.0.0`.
+   - The matrix `build` job reads `VERSION`, formats it as `v<version>`, and writes it to the package directory (`$pkgDir\VERSION`).
+   - The `publish` job downloads all build artifacts, reads `release-assets\VERSION`, and tags the GitHub Release accurately (e.g. `v1.0.0`) targeting the `release` branch (`--target '${{ github.ref_name }}'`).
+
+3. **Dual Release Asset Distribution**:
+   - **Ready-to-Use Bundles**: `tiny-utilities-x64.zip` and `tiny-utilities-arm64.zip` contain all 10 un-suffixed executables (`pin-to-top.exe`, `window-switcher.exe`, etc.) alongside `docs/shortcuts.ahk`. Users can extract the ZIP directly and use the tools immediately without renaming files or modifying scripts.
+   - **Individual Standalone Downloads**: Each utility is also copied with an architecture suffix (e.g. `pin-to-top-x64.exe`, `pin-to-top-arm64.exe`) for users who only need a single tool.
+
+4. **Release Documentation**:
+   - Documented the exact workflow in [`docs/DEVELOPMENT.md`](DEVELOPMENT.md) under `## 🚢 Release Process (How Releases Are Triggered)`.
+
+### Verification
+- Validated YAML syntax in `.github/workflows/release.yml`.
+- Validated `VERSION` content (`1.0.0`).
+- Documented updates in `docs/CHECKLIST.md` and `docs/JOURNEY.md`.
+

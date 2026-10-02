@@ -2,14 +2,15 @@ name: Release
 
 on:
   push:
+    branches:
+      - 'release'
     tags:
       - 'v*'
   workflow_dispatch:
     inputs:
       tag_name:
-        description: 'Release tag (e.g. v1.0.0)'
+        description: 'Release tag override (optional, defaults to VERSION file)'
         required: false
-        default: 'v1.0.0'
 
 permissions:
   contents: write
@@ -63,6 +64,11 @@ jobs:
               Copy-Item $_.FullName "$pkgDir\$($_.BaseName)-$arch.exe"
           }
 
+          # 3. Pass version tag metadata to publish job
+          $rawVer = if (Test-Path VERSION) { (Get-Content VERSION -Raw).Trim() } else { "1.0.0" }
+          $verTag = if ($rawVer.StartsWith('v')) { $rawVer } else { "v$rawVer" }
+          Set-Content -Path "$pkgDir\VERSION" -Value $verTag
+
       - name: Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -75,9 +81,6 @@ jobs:
     needs: build
     runs-on: windows-latest
     steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
-
       - name: Download All Artifacts
         uses: actions/download-artifact@v4
         with:
@@ -90,13 +93,18 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          # Determine release tag: manual input > VERSION file > fallback
           $tag = '${{ github.event.inputs.tag_name }}'
+          if (-not $tag -and (Test-Path release-assets\VERSION)) {
+              $tag = (Get-Content release-assets\VERSION -Raw).Trim()
+          }
           if (-not $tag) { $tag = '${{ github.ref_name }}' }
-          if (-not $tag -or $tag -eq 'master') { $tag = "v1.0.0" }
+          if (-not $tag -or $tag -eq 'release' -or $tag -eq 'master') { $tag = "v1.0.0" }
 
           Write-Host "Publishing release for tag: $tag"
-          $assets = Get-ChildItem -Path release-assets -File | ForEach-Object { $_.FullName }
+          $assets = Get-ChildItem -Path release-assets -File | Where-Object { $_.Name -ne 'VERSION' } | ForEach-Object { $_.FullName }
 
+          # Check if release already exists
           $releaseExists = $false
           try {
               gh release view $tag --json id | Out-Null
@@ -107,8 +115,9 @@ jobs:
               Write-Host "Release $tag already exists. Uploading assets..."
               gh release upload $tag $assets --clobber
           } else {
-              Write-Host "Creating new release $tag..."
+              Write-Host "Creating new release $tag on branch release..."
               gh release create $tag $assets `
+                  --target '${{ github.ref_name }}' `
                   --title "Tiny Windows Utilities $tag" `
                   --generate-notes
           }

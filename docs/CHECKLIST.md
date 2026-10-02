@@ -354,6 +354,20 @@ Legend: `[x]` done & verified, `[ ]` known gap, `[-]` not applicable.
   - `ip-send` (17 lines, exit code 0)
   - `capture` (19 lines, exit code 0)
 
+## 27. AUTOMATED RELEASE PIPELINE & VERSIONING WORKFLOW (2026-10-02)
+- [x] Dedicated `release` branch trigger in `.github/workflows/release.yml`:
+  - Triggers on push to `release` branch and version tags (`v*`).
+  - Supports manual release execution via `workflow_dispatch`.
+- [x] Root `VERSION` file as single source of truth:
+  - Version bump is tracked directly in repository root `VERSION` (e.g. `1.0.0`).
+  - Release workflow automatically reads `VERSION` to generate release tags (e.g. `v1.0.0`).
+- [x] Dual asset distribution strategy:
+  - Generates ready-to-use ZIP bundles (`tiny-utilities-x64.zip` and `tiny-utilities-arm64.zip`) containing un-suffixed `.exe` files and `shortcuts.ahk`.
+  - Generates standalone architecture-suffixed executables (`pin-to-top-x64.exe`, etc.) for users who need individual tools.
+  - Automatically avoids Node.js 20 runner deprecations by removing redundant `actions/checkout` in publish job.
+- [x] Release documentation in `docs/DEVELOPMENT.md`:
+  - Detailed step-by-step instructions on updating `VERSION` and triggering releases via `git push origin master:release`.
+
 ## Open items / notes
 - CPU idle % not re-measured; loop is event-wait based (sleeps 16 ms) so expected < 0.2%.
 - Manual visual verification of overlay rendering (border/disc appearance, click-through)

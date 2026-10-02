@@ -136,3 +136,25 @@ After modifying or adding a tool:
 3. **Documentation**:
    - Update [`CHECKLIST.md`](CHECKLIST.md) for behavior changes.
    - Update [`JOURNEY.md`](JOURNEY.md) for architectural decisions and trade-offs.
+
+---
+
+## 🚢 Release Process (How Releases Are Triggered)
+
+Releases are published automatically via GitHub Actions using the dedicated **`release` branch** and [`VERSION`](../VERSION) file:
+
+1. **Update Version**:
+   Edit the [`VERSION`](../VERSION) file in the repository root to the target release number (e.g. `1.0.1`).
+2. **Push to `release` Branch**:
+   ```bash
+   # From your working branch (master):
+   git push origin master:release
+   ```
+   *(Or merge locally: `git checkout release && git merge master && git push origin release`)*
+3. **Automated CI Build & Publish**:
+   - The [`release.yml`](../.github/workflows/release.yml) workflow triggers automatically on push to `release`.
+   - Reads the version from `VERSION` (e.g. `v1.0.1`).
+   - Compiles both `x64` and `arm64` binaries in parallel.
+   - Bundles all binaries into `tiny-utilities-x64.zip` and `tiny-utilities-arm64.zip` (clean `.exe` names + `shortcuts.ahk` ready to use).
+   - Automatically publishes the GitHub Release with generated release notes, standalone `.exe` downloads, and ZIP bundles.
+
