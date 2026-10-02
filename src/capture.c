@@ -15,6 +15,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <wchar.h>
+#include "common/tiny_cli.h"
 #include "common/tiny_gui.h"
 #include "common/tiny_dpi.h"
 #include "common/font.h"
@@ -183,36 +184,9 @@ static int GetToolbarHoverItem(int x, int y)
 /* CLI Parsing                                                        */
 /* ------------------------------------------------------------------ */
 
-static int SplitCommandLine(wchar_t *buf, wchar_t **argv, int max)
-{
-    int n = 0;
-    wchar_t *p = buf;
-    for (;;) {
-        while (*p == L' ' || *p == L'\t')
-            p++;
-        if (*p == L'\0')
-            break;
-        if (n >= max)
-            break;
-        if (*p == L'"') {
-            p++;
-            argv[n++] = p;
-            while (*p != L'\0' && *p != L'"')
-                p++;
-            if (*p == L'"')
-                *p++ = L'\0';
-        } else {
-            argv[n++] = p;
-            while (*p != L'\0' && *p != L' ' && *p != L'\t')
-                p++;
-            if (*p != L'\0')
-                *p++ = L'\0';
-        }
-    }
-    return n;
-}
 
-static void ParseCommandLine(int argc, wchar_t **argv, Config *cfg)
+
+static bool ParseCommandLine(int argc, wchar_t **argv, Config *cfg)
 {
     cfg->mode = MODE_FULLSCREEN;
     cfg->draw = false;
@@ -223,106 +197,102 @@ static void ParseCommandLine(int argc, wchar_t **argv, Config *cfg)
     cfg->fontSize = TinyFont_GetSystemDefaultSize();
     cfg->savePath[0] = L'\0';
 
-    bool explicitOutput = false;
+    bool optFullscreen = false;
+    bool optWindow = false;
+    bool optSnip = false;
+    bool optDraw = false;
+    bool optToolbar = false;
+    bool optNoToolbar = false;
+    bool optClipboard = false;
+    const wchar_t *optSavePath = NULL;
+    const wchar_t *optFormat = NULL;
+    int optFontSize = 0;
 
+    const CliOption opts[] = {
+        { L"--fullscreen",       CLI_OPT_BOOL,   &optFullscreen, 0, 0, NULL,          L"Capture entire virtual desktop (default)" },
+        { L"--window",           CLI_OPT_BOOL,   &optWindow,     0, 0, NULL,          L"Interactive window selection capture" },
+        { L"--snip",             CLI_OPT_BOOL,   &optSnip,       0, 0, NULL,          L"Interactive rectangular region capture" },
+        { L"--draw",             CLI_OPT_BOOL,   &optDraw,       0, 0, NULL,          L"Open annotation canvas overlay after capture" },
+        { L"--toolbar",          CLI_OPT_BOOL,   &optToolbar,    0, 0, NULL,          L"Show floating annotation toolbar" },
+        { L"--draw-toolbar",     CLI_OPT_BOOL,   &optToolbar,    0, 0, NULL,          NULL },
+        { L"--show-toolbar",     CLI_OPT_BOOL,   &optToolbar,    0, 0, NULL,          NULL },
+        { L"--no-toolbar",       CLI_OPT_BOOL,   &optNoToolbar,  0, 0, NULL,          L"Hide floating annotation toolbar" },
+        { L"--hide-toolbar",     CLI_OPT_BOOL,   &optNoToolbar,  0, 0, NULL,          NULL },
+        { L"--no-draw-toolbar",  CLI_OPT_BOOL,   &optNoToolbar,  0, 0, NULL,          NULL },
+        { L"--clipboard",        CLI_OPT_BOOL,   &optClipboard,  0, 0, NULL,          L"Copy captured bitmap to clipboard" },
+        { L"--save",             CLI_OPT_STRING, &optSavePath,   0, 0, L"<path>",     L"Save captured image to file or directory" },
+        { L"--format",           CLI_OPT_STRING, &optFormat,     0, 0, L"png|bmp",    L"Output image format (png or bmp, default: png)" },
+        { L"--font-size",        CLI_OPT_INT,    &optFontSize,   8, 48, L"<8-48>",    L"Font size in points for overlay UI" },
+    };
+
+    if (TinyCLI_CheckHelp(argc, argv,
+            L"Capture",
+            L"Screen capture & annotation utility",
+            L"capture.exe [--fullscreen | --window | --snip] [--draw] [--toolbar] [--clipboard] [--save <path>] [--format png|bmp] [--font-size <8-48>]",
+            opts, sizeof(opts) / sizeof(opts[0]))) {
+        return false;
+    }
+
+    TinyCLI_Parse(argc, argv, opts, sizeof(opts) / sizeof(opts[0]));
+
+    if (optFullscreen) cfg->mode = MODE_FULLSCREEN;
+    if (optWindow) cfg->mode = MODE_WINDOW;
+    if (optSnip) cfg->mode = MODE_SNIP;
+
+    if (optDraw) cfg->draw = true;
+    if (optToolbar) {
+        cfg->toolbar = true;
+        cfg->draw = true;
+    }
+    if (optNoToolbar) {
+        cfg->toolbar = false;
+    }
+
+    if (optFontSize >= 8 && optFontSize <= 48) {
+        cfg->fontSize = optFontSize;
+    }
+
+    if (optFormat) {
+        if (_wcsicmp(optFormat, L"bmp") == 0) {
+            cfg->format = FMT_BMP;
+        } else if (_wcsicmp(optFormat, L"png") == 0) {
+            cfg->format = FMT_PNG;
+        }
+    }
+
+    bool explicitOutput = false;
+    if (optClipboard) {
+        cfg->clipboard = true;
+        explicitOutput = true;
+    }
+
+    /* Check if --save was passed without argument (e.g. at end of line or before another flag) */
     for (int i = 1; i < argc; i++) {
-        if (_wcsicmp(argv[i], L"--fullscreen") == 0) {
-            cfg->mode = MODE_FULLSCREEN;
-        } else if (_wcsicmp(argv[i], L"--window") == 0) {
-            cfg->mode = MODE_WINDOW;
-        } else if (_wcsicmp(argv[i], L"--snip") == 0) {
-            cfg->mode = MODE_SNIP;
-        } else if (_wcsicmp(argv[i], L"--draw") == 0) {
-            cfg->draw = true;
-        } else if (_wcsicmp(argv[i], L"--toolbar") == 0 ||
-                   _wcsicmp(argv[i], L"--draw-toolbar") == 0 ||
-                   _wcsicmp(argv[i], L"--show-toolbar") == 0) {
-            cfg->toolbar = true;
-            cfg->draw = true;
-            if (i + 1 < argc) {
-                if (_wcsicmp(argv[i + 1], L"true") == 0 || _wcsicmp(argv[i + 1], L"1") == 0) {
-                    cfg->toolbar = true;
-                    i++;
-                } else if (_wcsicmp(argv[i + 1], L"false") == 0 || _wcsicmp(argv[i + 1], L"0") == 0) {
-                    cfg->toolbar = false;
-                    i++;
-                }
-            }
-        } else if (_wcsnicmp(argv[i], L"--toolbar=", 10) == 0) {
-            const wchar_t *val = argv[i] + 10;
-            if (_wcsicmp(val, L"false") == 0 || _wcsicmp(val, L"0") == 0) {
-                cfg->toolbar = false;
-            } else {
-                cfg->toolbar = true;
-                cfg->draw = true;
-            }
-        } else if (_wcsnicmp(argv[i], L"--draw-toolbar=", 15) == 0) {
-            const wchar_t *val = argv[i] + 15;
-            if (_wcsicmp(val, L"false") == 0 || _wcsicmp(val, L"0") == 0) {
-                cfg->toolbar = false;
-            } else {
-                cfg->toolbar = true;
-                cfg->draw = true;
-            }
-        } else if (_wcsnicmp(argv[i], L"--show-toolbar=", 15) == 0) {
-            const wchar_t *val = argv[i] + 15;
-            if (_wcsicmp(val, L"false") == 0 || _wcsicmp(val, L"0") == 0) {
-                cfg->toolbar = false;
-            } else {
-                cfg->toolbar = true;
-                cfg->draw = true;
-            }
-        } else if (_wcsicmp(argv[i], L"--no-toolbar") == 0 ||
-                   _wcsicmp(argv[i], L"--hide-toolbar") == 0 ||
-                   _wcsicmp(argv[i], L"--no-draw-toolbar") == 0) {
-            cfg->toolbar = false;
-        } else if (_wcsicmp(argv[i], L"--font-size") == 0) {
-            if (i + 1 < argc) {
-                int fs = _wtoi(argv[++i]);
-                if (fs >= 8 && fs <= 48) {
-                    cfg->fontSize = fs;
-                }
-            }
-        } else if (_wcsnicmp(argv[i], L"--font-size=", 12) == 0) {
-            int fs = _wtoi(argv[i] + 12);
-            if (fs >= 8 && fs <= 48) {
-                cfg->fontSize = fs;
-            }
-        } else if (_wcsicmp(argv[i], L"--format") == 0) {
-            if (i + 1 < argc) {
-                i++;
-                if (_wcsicmp(argv[i], L"bmp") == 0) {
-                    cfg->format = FMT_BMP;
-                } else if (_wcsicmp(argv[i], L"png") == 0) {
-                    cfg->format = FMT_PNG;
-                }
-            }
-        } else if (_wcsnicmp(argv[i], L"--format=", 9) == 0) {
-            const wchar_t *val = argv[i] + 9;
-            if (_wcsicmp(val, L"bmp") == 0) {
-                cfg->format = FMT_BMP;
-            } else if (_wcsicmp(val, L"png") == 0) {
-                cfg->format = FMT_PNG;
-            }
-        } else if (_wcsicmp(argv[i], L"--clipboard") == 0) {
-            cfg->clipboard = true;
-            explicitOutput = true;
-        } else if (_wcsicmp(argv[i], L"--save") == 0) {
-            if (i + 1 < argc && argv[i + 1][0] != L'-') {
-                i++;
-                wcsncpy(cfg->savePath, argv[i], MAX_PATH - 1);
-                cfg->savePath[MAX_PATH - 1] = L'\0';
-            } else {
-                wcscpy(cfg->savePath, L".");
-            }
+        if (_wcsicmp(argv[i], L"--save") == 0) {
             cfg->save = true;
             explicitOutput = true;
+            if (i + 1 < argc && argv[i + 1][0] != L'-') {
+                wcsncpy(cfg->savePath, argv[i + 1], MAX_PATH - 1);
+                cfg->savePath[MAX_PATH - 1] = L'\0';
+            } else if (!optSavePath) {
+                wcscpy(cfg->savePath, L".");
+            }
+            break;
         }
+    }
+
+    if (optSavePath && cfg->savePath[0] == L'\0') {
+        wcsncpy(cfg->savePath, optSavePath, MAX_PATH - 1);
+        cfg->savePath[MAX_PATH - 1] = L'\0';
+        cfg->save = true;
+        explicitOutput = true;
     }
 
     if (!explicitOutput) {
         cfg->clipboard = true;
     }
+
+    return true;
 }
 
 /* ------------------------------------------------------------------ */
@@ -2087,20 +2057,24 @@ static bool RunUnifiedCapturePipeline(CaptureStage initialStage)
 
 int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrevInst, LPSTR lpCmdLine, int nCmdShow)
 {
-    TinyDPI_EnablePerMonitorAwareness();
+    (void)hInst; (void)hPrevInst; (void)lpCmdLine; (void)nCmdShow;
 
     wchar_t *cmdLineW = GetCommandLineW();
     wchar_t cmdCopy[2048];
     wcsncpy(cmdCopy, cmdLineW, 2047);
     cmdCopy[2047] = L'\0';
 
-    wchar_t *argv[MAX_ARGV];
-    int argc = SplitCommandLine(cmdCopy, argv, MAX_ARGV);
+    wchar_t *argv[TINY_CLI_MAX_ARGS];
+    int argc = TinyCLI_Tokenize(cmdCopy, argv, TINY_CLI_MAX_ARGS);
+
+    if (!ParseCommandLine(argc, argv, &g_cfg)) {
+        return 0;
+    }
+
+    TinyDPI_EnablePerMonitorAwareness();
 
     bool isInteractiveMode = (argc <= 1);
     g_isInteractiveMode = isInteractiveMode;
-
-    ParseCommandLine(argc, argv, &g_cfg);
 
     /* IPC Single Instance Check */
     HANDLE hMutex = CreateMutexW(NULL, FALSE, APPMUTEX_NAME);

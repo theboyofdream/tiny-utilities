@@ -1833,53 +1833,6 @@ static LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
     return DefWindowProcW(hwnd, msg, wParam, lParam);
 }
 
-/* --- Show Help --- */
-static void ShowHelp(void) {
-    if (AttachConsole(ATTACH_PARENT_PROCESS)) {
-        HANDLE hOut = GetStdHandle(STD_OUTPUT_HANDLE);
-        if (hOut && hOut != INVALID_HANDLE_VALUE) {
-            const char *helpText =
-                "Tiny Window Switcher v1.0\n"
-                "Usage: window-switcher.exe [options]\n\n"
-                "Options:\n"
-                "  -l, --layout <mode>      Layout mode: center or full (default: center)\n"
-                "  -s, --sort <mode>        Sorting mode: recent or name (default: name)\n"
-                "  -bg, --background <mode> Background effect: blur or tint (default: blur)\n"
-                "  --blur <amount>          Blur intensity (1..100, default: 20)\n"
-                "  --tint-color <color>     Tint hex color e.g. #000000 or #00000005 (default: #000000)\n"
-                "  -d, --delay <ms>         Auto-activation delay in milliseconds (0..5000, default: 300)\n"
-                "  -c, --accent-color <hex> Accent hex color e.g. #0078D7 or #FF5500 (default: Windows wallpaper accent)\n"
-                "  -sw, --stroke-width <px> Card border stroke width in px (0..20, default: 1; 0 disables border)\n"
-                "  -a, --alt-tab            Start with next item selected (Alt+Tab mode)\n"
-                "  -n, --next               Alias for --alt-tab\n"
-                "  -h, --help               Show this help message\n"
-                "  -v, --version            Show version information\n";
-            DWORD written = 0;
-            WriteFile(hOut, helpText, (DWORD)strlen(helpText), &written, NULL);
-        }
-        FreeConsole();
-    } else {
-        MessageBoxW(NULL,
-            L"Tiny Window Switcher v1.0\n\n"
-            L"Usage: window-switcher.exe [options]\n\n"
-            L"Options:\n"
-            L"  -l, --layout <mode>      Layout mode: center or full (default: center)\n"
-            L"  -s, --sort <mode>        Sorting mode: recent or name (default: name)\n"
-            L"  -bg, --background <mode> Background effect: blur or tint (default: blur)\n"
-            L"  --blur <amount>          Blur intensity (1..100, default: 20)\n"
-            L"  --tint-color <color>     Tint hex color e.g. #000000 or #00000005 (default: #000000)\n"
-            L"  -d, --delay <ms>         Auto-activation delay in milliseconds (0..5000, default: 300)\n"
-            L"  -c, --accent-color <hex> Accent hex color e.g. #0078D7 or #FF5500 (default: Windows wallpaper accent)\n"
-            L"  -sw, --stroke-width <px> Card border stroke width in px (0..20, default: 1; 0 disables border)\n"
-            L"  -a, --alt-tab            Start with next item selected (Alt+Tab mode)\n"
-            L"  -n, --next               Alias for --alt-tab\n"
-            L"  -h, --help               Show this help message\n"
-            L"  -v, --version            Show version information",
-            L"Tiny Window Switcher — Help",
-            MB_OK | MB_ICONINFORMATION);
-    }
-}
-
 /* --- Parse CLI Arguments --- */
 static bool ParseCLI(void) {
     const wchar_t *layoutStr = NULL;
@@ -1887,35 +1840,40 @@ static bool ParseCLI(void) {
     const wchar_t *bgModeStr = NULL;
     const wchar_t *tintColorStr = NULL;
     const wchar_t *accentColorStr = NULL;
-    bool showHelp = false;
     bool showVersion = false;
 
     CliOption options[] = {
-        { L"--layout",        CLI_OPT_STRING, &layoutStr,         0, 0 },
-        { L"-l",              CLI_OPT_STRING, &layoutStr,         0, 0 },
-        { L"--sort",         CLI_OPT_STRING, &sortStr,           0, 0 },
-        { L"-s",             CLI_OPT_STRING, &sortStr,           0, 0 },
-        { L"--background",   CLI_OPT_STRING, &bgModeStr,         0, 0 },
-        { L"-bg",            CLI_OPT_STRING, &bgModeStr,         0, 0 },
-        { L"--blur",         CLI_OPT_INT,    &g_cfg.blurAmount,  1, 100 },
-        { L"--tint-color",   CLI_OPT_STRING, &tintColorStr,      0, 0 },
-        { L"--delay",        CLI_OPT_INT,    &g_cfg.delayMs,     0, 5000 },
-        { L"-d",             CLI_OPT_INT,    &g_cfg.delayMs,     0, 5000 },
-        { L"--accent-color",  CLI_OPT_STRING, &accentColorStr,    0, 0 },
-        { L"--accent",        CLI_OPT_STRING, &accentColorStr,    0, 0 },
-        { L"-c",              CLI_OPT_STRING, &accentColorStr,    0, 0 },
-        { L"--stroke-width",  CLI_OPT_INT,    &g_cfg.strokeWidth, 0, 20 },
-        { L"--stroke",        CLI_OPT_INT,    &g_cfg.strokeWidth, 0, 20 },
-        { L"-sw",             CLI_OPT_INT,    &g_cfg.strokeWidth, 0, 20 },
-        { L"--alt-tab",      CLI_OPT_BOOL,   &g_cfg.altTab,      0, 0 },
-        { L"-a",             CLI_OPT_BOOL,   &g_cfg.altTab,      0, 0 },
-        { L"--next",         CLI_OPT_BOOL,   &g_cfg.altTab,      0, 0 },
-        { L"-n",             CLI_OPT_BOOL,   &g_cfg.altTab,      0, 0 },
-        { L"--help",         CLI_OPT_BOOL,   &showHelp,          0, 0 },
-        { L"-h",             CLI_OPT_BOOL,   &showHelp,          0, 0 },
-        { L"--version",      CLI_OPT_BOOL,   &showVersion,       0, 0 },
-        { L"-v",             CLI_OPT_BOOL,   &showVersion,       0, 0 },
+        { L"--layout",        CLI_OPT_STRING, &layoutStr,         0, 0,    L"<center|full>", L"Layout mode: center or full (default: center)" },
+        { L"-l",              CLI_OPT_STRING, &layoutStr,         0, 0,    NULL,             NULL },
+        { L"--sort",          CLI_OPT_STRING, &sortStr,           0, 0,    L"<recent|name>", L"Sorting mode: recent or name (default: name)" },
+        { L"-s",              CLI_OPT_STRING, &sortStr,           0, 0,    NULL,             NULL },
+        { L"--background",    CLI_OPT_STRING, &bgModeStr,         0, 0,    L"<blur|tint>",   L"Background effect: blur or tint (default: blur)" },
+        { L"-bg",             CLI_OPT_STRING, &bgModeStr,         0, 0,    NULL,             NULL },
+        { L"--blur",          CLI_OPT_INT,    &g_cfg.blurAmount,  1, 100,  L"<1-100>",       L"Blur intensity (1..100, default: 20)" },
+        { L"--tint-color",    CLI_OPT_STRING, &tintColorStr,      0, 0,    L"<hex>",         L"Tint hex color e.g. #000000 (default: #000000)" },
+        { L"--delay",         CLI_OPT_INT,    &g_cfg.delayMs,     0, 5000, L"<ms>",          L"Auto-activation delay in ms (0..5000, default: 300)" },
+        { L"-d",              CLI_OPT_INT,    &g_cfg.delayMs,     0, 5000, NULL,             NULL },
+        { L"--accent-color",  CLI_OPT_STRING, &accentColorStr,    0, 0,    L"<hex>",         L"Accent hex color e.g. #0078D7 (default: wallpaper)" },
+        { L"--accent",        CLI_OPT_STRING, &accentColorStr,    0, 0,    NULL,             NULL },
+        { L"-c",              CLI_OPT_STRING, &accentColorStr,    0, 0,    NULL,             NULL },
+        { L"--stroke-width",  CLI_OPT_INT,    &g_cfg.strokeWidth, 0, 20,   L"<px>",          L"Card border stroke width in px (0..20, default: 1)" },
+        { L"--stroke",        CLI_OPT_INT,    &g_cfg.strokeWidth, 0, 20,   NULL,             NULL },
+        { L"-sw",             CLI_OPT_INT,    &g_cfg.strokeWidth, 0, 20,   NULL,             NULL },
+        { L"--alt-tab",       CLI_OPT_BOOL,   &g_cfg.altTab,      0, 0,    NULL,             L"Start with next item selected (Alt+Tab mode)" },
+        { L"-a",              CLI_OPT_BOOL,   &g_cfg.altTab,      0, 0,    NULL,             NULL },
+        { L"--next",          CLI_OPT_BOOL,   &g_cfg.altTab,      0, 0,    NULL,             NULL },
+        { L"-n",              CLI_OPT_BOOL,   &g_cfg.altTab,      0, 0,    NULL,             NULL },
+        { L"--version",       CLI_OPT_BOOL,   &showVersion,       0, 0,    NULL,             L"Show version information" },
+        { L"-v",              CLI_OPT_BOOL,   &showVersion,       0, 0,    NULL,             NULL },
     };
+
+    if (TinyCLI_CheckHelpCommandLine(
+            L"window-switcher",
+            L"Fast keyboard window switcher with live thumbnail cards",
+            L"window-switcher [options]",
+            options, sizeof(options)/sizeof(options[0]))) {
+        return false;
+    }
 
     TinyCLI_ParseCommandLine(options, sizeof(options)/sizeof(options[0]));
 
@@ -1938,8 +1896,8 @@ static bool ParseCLI(void) {
     if (g_cfg.strokeWidth < 0) g_cfg.strokeWidth = 0;
     if (g_cfg.strokeWidth > 20) g_cfg.strokeWidth = 20;
 
-    if (showHelp || showVersion) {
-        ShowHelp();
+    if (showVersion) {
+        TinyCLI_OutputHelp(L"window-switcher", L"window-switcher v1.0 — Fast keyboard window switcher");
         return false;
     }
 
@@ -1991,11 +1949,16 @@ static void InvalidateOverlay(void) {
 
 /* --- Entry Point --- */
 int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR lpCmdLine, int nCmdShow) {
-    TinyDPI_EnablePerMonitorAwareness();
+    (void)hInstance;
+    (void)hPrevInstance;
+    (void)lpCmdLine;
+    (void)nCmdShow;
 
     if (!ParseCLI()) {
         return 0;
     }
+
+    TinyDPI_EnablePerMonitorAwareness();
 
     HANDLE hEvent = NULL;
     if (!TinyIPC_AcquireOrToggle(APPMUTEX_NAME, APPEVENT_NAME, &hEvent)) {

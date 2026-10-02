@@ -4,6 +4,10 @@
 
 `ip-send` is a fast, terminal/TUI-inspired payload composer and dispatcher for IP Messenger (`ipcmd.exe`). It eliminates content-selection overhead by launching directly with captured files or text, active recipient search by default, and a hidden message field that opens on demand.
 
+> [!NOTE]
+> **Prerequisite**: `ip-send` requires [IP Messenger for Windows (`ipcmd.exe` / `ipmsg.exe`)](https://ipmsg.org/en/) installed on your system. If not detected on launch or when sending, `ip-send` displays a native error dialog indicating that IP Messenger needs to be installed.  
+> *Disclaimer: `ip-send` is an independent open-source frontend utility and is not affiliated with, sponsored, or endorsed by the creators of IP Messenger (`ipmsg.org`).*
+
 ---
 
 ## 1. CLI Arguments & Context Menu Registration

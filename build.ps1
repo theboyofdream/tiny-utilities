@@ -4,7 +4,10 @@ param(
     [string[]]$Targets,
 
     [ValidateSet('release', 'debug')]
-    [string]$Mode = 'release'
+    [string]$Mode = 'release',
+
+    [ValidateSet('x64', 'arm64')]
+    [string]$Arch = 'x64'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -12,7 +15,11 @@ $ErrorActionPreference = 'Stop'
 $ROOT = $PSScriptRoot
 $SRC = Join-Path $ROOT 'src'
 $DIST = Join-Path $ROOT 'dist'
-$TARGET_DIST = Join-Path $DIST $Mode.ToLower()
+$TARGET_DIST = if ($Arch -eq 'arm64') {
+    Join-Path (Join-Path $DIST $Mode.ToLower()) 'arm64'
+} else {
+    Join-Path $DIST $Mode.ToLower()
+}
 
 function Ensure-ToolchainPath {
     if ((Get-Command clang -ErrorAction SilentlyContinue) -or (Get-Command clang-cl -ErrorAction SilentlyContinue)) {
@@ -79,56 +86,46 @@ $TARGET_CONFIGS = [ordered]@{
     'pin-to-top' = @{
         Subsystem = 'windows'
         Libs      = @('user32', 'gdi32')
-        Aliases   = @('pin')
     }
     'find-my-mouse' = @{
         Subsystem = 'windows'
         Libs      = @('user32', 'gdi32')
-        Aliases   = @('cursor', 'cursorfocus')
     }
     'color-picker' = @{
         Subsystem = 'windows'
         Libs      = @('user32', 'gdi32')
-        Aliases   = @('colorpicker', 'picker')
     }
     'capture' = @{
         Subsystem = 'windows'
         Libs      = @('user32', 'gdi32', 'comdlg32')
-        Aliases   = @('snip')
     }
     'pixel-view' = @{
         Subsystem  = 'windows'
         Libs       = @('user32', 'gdi32', 'ole32', 'windowscodecs', 'comdlg32', 'shell32')
         ExtraMinGW = @('-municode')
-        Aliases    = @('pixelview')
     }
     'ip-send' = @{
         Subsystem = 'windows'
         Libs      = @('user32', 'gdi32', 'shell32', 'comdlg32', 'advapi32')
-        Aliases   = @('ip', 'ipmsg')
     }
     'context-menu' = @{
         Subsystem = 'windows'
         Libs      = @('user32', 'shell32', 'comdlg32', 'advapi32', 'comctl32')
-        Aliases   = @('contextmenu')
     }
     'ocr' = @{
         Subsystem   = 'windows'
         Libs        = @('user32', 'shell32', 'ole32', 'urlmon', 'shlwapi', 'windowscodecs', 'gdi32', 'comdlg32')
         ExtraMinGW  = @('-municode')
-        Aliases     = @()
     }
     'window-switcher' = @{
         Subsystem   = 'windows'
         Libs        = @('user32', 'gdi32', 'dwmapi', 'shell32', 'ole32', 'version', 'advapi32')
         ExtraMinGW  = @('-municode')
-        Aliases     = @('switcher', 'win-switch', 'windowswitcher')
     }
     'mouse-spotlight' = @{
         Subsystem   = 'windows'
         Libs        = @('user32', 'gdi32')
         ExtraMinGW  = @('-municode')
-        Aliases     = @('spotlight', 'mousespotlight')
     }
 }
 
@@ -137,30 +134,31 @@ function Resolve-TargetName([string]$Name) {
     if ($TARGET_CONFIGS.Contains($normalized)) {
         return $normalized
     }
-    foreach ($entry in $TARGET_CONFIGS.GetEnumerator()) {
-        if ($entry.Value.Aliases -and $entry.Value.Aliases -contains $normalized) {
-            return $entry.Key
-        }
-    }
     return $null
 }
 
-function Build-Target([string]$TargetName, [string]$BuildMode) {
+function Build-Target([string]$TargetName, [string]$BuildMode, [string]$BuildArch = 'x64') {
     $canonicalName = Resolve-TargetName $TargetName
     if (-not $canonicalName) {
-        throw "Unknown build target: '$TargetName'"
+        $validTargets = ($TARGET_CONFIGS.Keys) -join ', '
+        throw "Unknown build target: '$TargetName'. Valid targets are: $validTargets"
     }
 
     $config = $TARGET_CONFIGS[$canonicalName]
     $srcFile = Join-Path $SRC "$canonicalName.c"
-    $outFile = Join-Path $TARGET_DIST "$canonicalName.exe"
+    $targetDist = if ($BuildArch -eq 'arm64') {
+        Join-Path (Join-Path $DIST $BuildMode.ToLower()) 'arm64'
+    } else {
+        Join-Path $DIST $BuildMode.ToLower()
+    }
+    $outFile = Join-Path $targetDist "$canonicalName.exe"
 
     if (-not (Test-Path $srcFile)) {
         throw "Source file not found: $srcFile"
     }
 
-    New-Item -ItemType Directory -Path $TARGET_DIST -Force | Out-Null
-    Write-Host "==> $canonicalName ($BuildMode) -> dist/$BuildMode/$canonicalName.exe"
+    New-Item -ItemType Directory -Path $targetDist -Force | Out-Null
+    Write-Host "==> $canonicalName ($BuildMode, $BuildArch) -> dist/$BuildMode/$canonicalName.exe"
 
     # Generate library arguments
     $libsMinGW = @($config.Libs | ForEach-Object { "-l$_" })
@@ -174,6 +172,9 @@ function Build-Target([string]$TargetName, [string]$BuildMode) {
     $subsystemMinGW = "-m$($config.Subsystem)"
     $subsystemMSVC  = "/SUBSYSTEM:$($config.Subsystem.ToUpper())"
 
+    $targetTripleMinGW = if ($BuildArch -eq 'arm64') { 'aarch64-w64-windows-gnu' } else { 'x86_64-w64-windows-gnu' }
+    $targetTripleMSVC  = if ($BuildArch -eq 'arm64') { 'arm64-pc-windows-msvc' }   else { 'x86_64-pc-windows-msvc' }
+
     if ($BuildMode -eq 'release') {
         # 1. MinGW Clang with standardized size and performance optimization
         if (Get-Command clang -ErrorAction SilentlyContinue) {
@@ -185,7 +186,7 @@ function Build-Target([string]$TargetName, [string]$BuildMode) {
                 '-fdata-sections',
                 '-Wl,--gc-sections',
                 '-Wl,-s',
-                '--target=x86_64-w64-windows-gnu',
+                "--target=$targetTripleMinGW",
                 $subsystemMinGW
             )
             $cmdArgs += $libsMinGW
@@ -205,6 +206,7 @@ function Build-Target([string]$TargetName, [string]$BuildMode) {
         if (Get-Command clang-cl -ErrorAction SilentlyContinue) {
             $cmdArgs = @(
                 $srcFile,
+                "--target=$targetTripleMSVC",
                 '/O1',
                 '/Gy',
                 '/Gw',
@@ -230,6 +232,7 @@ function Build-Target([string]$TargetName, [string]$BuildMode) {
         if (Get-Command clang-cl -ErrorAction SilentlyContinue) {
             $cmdArgs = @(
                 $srcFile,
+                "--target=$targetTripleMSVC",
                 '/Od',
                 '/Zi',
                 '/link'
@@ -254,7 +257,7 @@ function Build-Target([string]$TargetName, [string]$BuildMode) {
                 $srcFile,
                 '-g',
                 '-O0',
-                '--target=x86_64-w64-windows-gnu',
+                "--target=$targetTripleMinGW",
                 $subsystemMinGW
             )
             $cmdArgs += $libsMinGW
@@ -271,17 +274,17 @@ function Build-Target([string]$TargetName, [string]$BuildMode) {
         }
     }
 
-    throw "Build failed: $canonicalName ($BuildMode)"
+    throw "Build failed: $canonicalName ($BuildMode, $BuildArch)"
 }
 
-function Build-All([string]$BuildMode) {
+function Build-All([string]$BuildMode, [string]$BuildArch = 'x64') {
     foreach ($name in $TARGET_CONFIGS.Keys) {
-        Build-Target $name $BuildMode
+        Build-Target $name $BuildMode $BuildArch
     }
 }
 
 if (-not $Targets -or $Targets.Count -eq 0) {
-    Write-Host "Build Mode: $Mode"
+    Write-Host "Build Mode: $Mode ($Arch)"
     Write-Host "1) all"
     $index = 2
     $indexMap = @{}
@@ -295,15 +298,15 @@ if (-not $Targets -or $Targets.Count -eq 0) {
     $choice = Read-Host 'Build'
 
     if ($choice -eq '1' -or $choice.ToLower() -eq 'all') {
-        Build-All $Mode
+        Build-All $Mode $Arch
     }
     elseif ($indexMap.ContainsKey($choice)) {
-        Build-Target $indexMap[$choice] $Mode
+        Build-Target $indexMap[$choice] $Mode $Arch
     }
     else {
         $resolved = Resolve-TargetName $choice
         if ($resolved) {
-            Build-Target $resolved $Mode
+            Build-Target $resolved $Mode $Arch
         }
         else {
             Write-Error "Invalid selection: '$choice'"
@@ -314,12 +317,12 @@ if (-not $Targets -or $Targets.Count -eq 0) {
 else {
     foreach ($target in $Targets) {
         if ($target.ToLower() -eq 'all') {
-            Build-All $Mode
+            Build-All $Mode $Arch
         }
         else {
-            Build-Target $target $Mode
+            Build-Target $target $Mode $Arch
         }
     }
 }
 
-Write-Host "Build complete ($Mode)."
+Write-Host "Build complete ($Mode, $Arch)."

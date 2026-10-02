@@ -2,6 +2,10 @@
 
 ## Overview
 
+> [!WARNING]
+> **Status: Preview / Experimental**  
+> This utility is currently an experimental preview and under active development. Core features like CLI XML backup and update exist, but advanced interactive management and edge cases are still evolving. Use with caution.
+
 `context-menu` is a native Win32/C Windows Explorer context menu manager. It allows users to define, update, and backup per-user Explorer context menu entries using simple XML configuration files. It supports unlimited nested submenus, action commands, arguments with Windows placeholders (`%1`, `%V`), custom icons, complete pre-flight XML validation, strict isolation of managed entries, and idempotent registry synchronization.
 
 ---

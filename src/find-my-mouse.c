@@ -34,6 +34,7 @@
 #include <stdbool.h>
 #include <stdlib.h>
 #include <wchar.h>
+#include "common/tiny_cli.h"
 #include "common/tiny_gui.h"
 #include "common/tiny_dpi.h"
 
@@ -391,6 +392,14 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     (void)hPrevInstance;
     (void)lpCmdLine;
     (void)nCmdShow;
+
+    if (TinyCLI_CheckHelpCommandLine(
+            L"find-my-mouse",
+            L"Presentation spotlight overlay focusing attention on cursor",
+            L"find-my-mouse",
+            NULL, 0)) {
+        return 0;
+    }
 
     TinyDPI_EnablePerMonitorAwareness(); /* 1:1 physical-pixel coordinates for the overlay */
 

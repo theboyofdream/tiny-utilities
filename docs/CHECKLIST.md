@@ -172,7 +172,8 @@ Legend: `[x]` done & verified, `[ ]` known gap, `[-]` not applicable.
 - [x] Single instance IPC: `Global\TinyIPSendMutex` and `Global\TinyIPSendEvent` toggle support. When multiple files are selected in Explorer (spawning concurrent instances), subsequent instances forward payload arguments via `WM_COPYDATA` to the active window instead of triggering toggle-off.
 - [x] Build rule verified: `pwsh -File .\build.ps1 ip-send` builds `dist/release/ip-send.exe` cleanly.
 
-## 18. CONTEXT MENU UTILITY
+## 18. CONTEXT MENU UTILITY (Preview / Experimental)
+- [-] Status: **Preview / Experimental** — Core CLI XML backup/update engine implemented; interactive visual editor and advanced shell integration under evaluation.
 - [x] Binary target: `context-menu.exe` native C / Win32 application.
 - [x] CLI interface: `context-menu.exe --update <config.xml>` (applies XML config immediately) and `context-menu.exe --backup <backup.xml>` (exports managed entries to XML).
 - [x] Double-click flow: double-clicking without CLI flags opens a native Windows choice dialog with options: **Update Context Menu**, **Backup Context Menu**, and **Cancel**.
@@ -329,6 +330,29 @@ Legend: `[x]` done & verified, `[ ]` known gap, `[-]` not applicable.
   - Added `CS_HREDRAW | CS_VREDRAW` and explicit repaint invalidation to border overlay window class so resized windows maintain clean, artifact-free borders.
   - Centered interactive picker prompt dynamically on active monitor containing cursor.
   - Verified `pwsh -File .\build.ps1 pin-to-top` compiles cleanly in release and debug modes with 0 errors/warnings and verified double-launch toggle IPC pattern.
+
+## 26. UNIFIED DECLARATIVE CLI `--help`, `-h`, `/?` ACROSS ALL 10 UTILITIES (2026-10-01)
+- [x] Shared declarative CLI help system (`src/common/tiny_cli.h`):
+  - Added `valHint` and `description` fields to `CliOption` structure.
+  - Added support for `--key=val` syntax alongside `--key val` in `TinyCLI_Parse`.
+  - Added support for boolean option negation/clearing (`--flag=false`, `--flag=0`) in `TinyCLI_Parse`.
+  - Added `TinyCLI_HasHelp`, `TinyCLI_FormatHelp`, `TinyCLI_OutputHelp`, `TinyCLI_CheckHelp`, and `TinyCLI_CheckHelpCommandLine`.
+  - Dual-mode output handling for Win32 GUI binaries (`-mwindows`): checks inherited `GetStdHandle(STD_OUTPUT_HANDLE)` first to preserve stdout redirection (`> help.txt`, pipes, CI runners), attaches to parent console (`AttachConsole(ATTACH_PARENT_PROCESS)` + `CONOUT$`) for interactive PowerShell / CMD sessions, and falls back to native `MessageBoxW` if run without a console (e.g. from Explorer or Run dialog).
+- [x] Complete CLI options table deduplication across all 10 utilities:
+  - Eliminated duplicate `opts[]` arrays and manual argument parsing loops in `src/pin-to-top.c`, `src/window-switcher.c`, `src/pixel-view.c`, `src/capture.c`, and `src/ip-send.c`.
+  - Every utility defines its `CliOption` options array strictly once, which is reused for both help generation and argument parsing.
+  - In `src/ip-send.c`, unified CLI parsing across `ParseCommandLine`, single-instance launch, and `WM_COPYDATA` payload forwarding, removing ~100 lines of duplicate parsing code.
+- [x] Verified `--help` output and zero-exit code across all 10 tools:
+  - `mouse-spotlight` (11 lines, exit code 0)
+  - `pin-to-top` (13 lines, exit code 0)
+  - `window-switcher` (19 lines, exit code 0)
+  - `ocr` (14 lines, exit code 0)
+  - `find-my-mouse` (9 lines, exit code 0)
+  - `color-picker` (11 lines, exit code 0)
+  - `pixel-view` (14 lines, exit code 0)
+  - `context-menu` (11 lines, exit code 0)
+  - `ip-send` (17 lines, exit code 0)
+  - `capture` (19 lines, exit code 0)
 
 ## Open items / notes
 - CPU idle % not re-measured; loop is event-wait based (sleeps 16 ms) so expected < 0.2%.

@@ -2009,3 +2009,89 @@ All 10 utilities built cleanly with zero modifications to the codebase:
 - Compiled release build via `pwsh -File .\build.ps1 -Mode release window-switcher`.
 - Deployed binary to `C:\Users\abhishek.c\Documents\AutoHotkey\window-switcher.exe`.
 - Confirmed that double-launch toggle contracts exit cleanly with code 0.
+
+---
+
+## 2026-10-01: Documentation Architecture, Workflow Showcases, CI Releases & Status Polish
+
+### Context & Motivation
+Following rapid feature development across all 10 tools, the project documentation and build ergonomics needed architectural refinement:
+1. `README.md` had accumulated hundreds of lines of low-level CLI flags and compiler setup instructions, obscuring its core value proposition.
+2. New developers cloning the repository lacked an isolated, cohesive onboarding guide.
+3. Build scripts accepted multiple ambiguous short aliases (`pin`, `switcher`), which conflicted with canonical target names.
+4. AutoHotkey bindings in `docs/shortcuts.ahk` referenced `mouse-spotlight` on Double-Tap Ctrl (author's daily driver), but docs still referenced `find-my-mouse`.
+5. `ip-send.c` lacked official IP Messenger icon display in Explorer context menus.
+6. `context-menu.c` had basic CLI functionality but lacked complete interactive UI editing; it needed accurate status labeling without taking on premature development bloat.
+
+### Design Decisions & Implementation
+
+1. **Separation of Concerns: `README.md` vs `docs/DEVELOPMENT.md`**:
+   - Trimmed `README.md` from 277 lines to ~90 punchy lines focused on features, prebuilt binary downloads, and hotkey workflows.
+   - Created [`docs/DEVELOPMENT.md`](file:///C:/Users/abhishek.c/Desktop/playground/tiny-windows-utilites/docs/DEVELOPMENT.md) dedicated entirely to the developer setup: 1-minute quickstart (`winget install LLVM.LLVM`), build flags, shared micro-headers in `src/common/`, and verification workflows.
+
+2. **Author Workflow & Setup Showcase (`docs/HOW_I_USE_IT.md`)**:
+   - Documented the author's real-world keyboard-driven workflow.
+   - Emphasized that `window-switcher` exists not because Windows Alt+Tab is "heavy", but to eliminate the visual search/hunting penalty across 10–20 open windows via 1-key direct hint badges.
+   - Documented switching from `find-my-mouse` to `mouse-spotlight` for dual-purpose cursor location and presentation focus.
+   - Added clear non-affiliation disclaimers regarding IP Messenger (`ipmsg.org`).
+
+3. **Strict Canonical Build Targets in `build.ps1`**:
+   - Stripped informal shorthand aliases from `$TARGET_CONFIGS` in `build.ps1` to enforce strict canonical names (`pin-to-top`, `find-my-mouse`, `mouse-spotlight`, `color-picker`, `capture`, `pixel-view`, `ip-send`, `context-menu`, `ocr`, `window-switcher`).
+   - Updated `Resolve-TargetName` with a descriptive error message listing valid canonical targets when an invalid name is provided.
+
+4. **IP Messenger Context Menu Icon (`src/ip-send.c`)**:
+   - Updated `RegisterContextMenu()` in `src/ip-send.c` to locate `ipmsg.exe` or `ipcmd.exe` and write the `"Icon"` REG_SZ value to Explorer context menu keys under `HKCU\Software\Classes\*\shell\Send via IP-send`, `Directory\shell\...`, and `Directory\Background\shell\...`.
+
+5. **Context Menu Utility Status**:
+   - Explicitly marked `context-menu.exe` as `[Preview / Experimental]` across `README.md`, `docs/DEVELOPMENT.md`, `docs/CHECKLIST.md`, and `docs/context-menu.md` to prevent false expectations while preserving existing CLI XML backup/update capabilities.
+
+### Verification
+- Tested `build.ps1` canonical resolution: `pwsh -File .\build.ps1 ip-send` compiles cleanly and produces valid binary with icon registration.
+- Verified all markdown links and documentation consistency across docs tree.
+
+---
+
+## 2026-10-01: Declarative Help System & CLI Option Table Deduplication
+
+### Context & User Request
+- User noted: *"Now I noticed all utilities are missing help cmd. Will updating tiny cli header can add this feature to all tools?"*
+- During initial implementation via parallel subagents, helper options tables (`const CliOption helpOpts[]`) were duplicated in entry points (`WinMain`/`wWinMain`) separately from the runtime parser functions/loops.
+- User feedback: *"Cli options seems to be defined 2 times in pin to top. Also check other utils"*.
+
+### Architectural Decisions & Thought Process
+
+1. **Centralized Declarative Help in `tiny_cli.h`**:
+   - Rather than each tool manually printing help via custom string blocks or `printf`, `tiny_cli.h` was enhanced with `valHint` and `description` fields on `CliOption`.
+   - Added `TinyCLI_HasHelp`, `TinyCLI_FormatHelp`, `TinyCLI_OutputHelp`, `TinyCLI_CheckHelp`, and `TinyCLI_CheckHelpCommandLine`.
+   - Automatically appends `-h, --help, /?` to every formatted manual with aligned option padding.
+
+2. **Dual-Mode Win32 GUI Subsystem Output Architecture**:
+   - Because all 10 tools are compiled with `-mwindows` (GUI subsystem) for click-through overlays and windowless operation, standard `printf` does not connect to the console.
+   - Initial naive implementations called `AttachConsole(ATTACH_PARENT_PROCESS)` and unconditionally opened `CONOUT$`. While this worked in interactive shells, it broke standard redirection (`tool.exe --help > help.txt` or pipe capture in automated environments) because `CONOUT$` bypasses redirected handles.
+   - Refined `TinyCLI_OutputHelp` to inspect `GetStdHandle(STD_OUTPUT_HANDLE)` first:
+     - If an inherited or redirected handle is already valid (pipes, redirected files), it writes directly via `WriteFile` / `WriteConsoleW` to that handle.
+     - If the handle is null/invalid, it calls `AttachConsole(ATTACH_PARENT_PROCESS)` and opens `CONOUT$` to write directly to the parent terminal.
+     - If neither is available (launched by double-clicking in Explorer or from Windows Run dialog), it gracefully falls back to native `MessageBoxW`.
+
+3. **Strict Single-Definition Contract for CLI Options**:
+   - Eliminated all duplicate options declarations. Every tool defines `CliOption opts[]` strictly once, bound to its runtime variables.
+   - In `pin-to-top.c`: Single declaration in `BuildConfig` used for both `TinyCLI_CheckHelpCommandLine` and `TinyCLI_ParseCommandLine`.
+   - In `window-switcher.c`: Single declaration in `ParseCLI` used for both help checking and argument parsing; duplicate `helpOpts` removed from `wWinMain`.
+   - In `pixel-view.c`: Single declaration in `ParseArgs` used for both `TinyCLI_CheckHelp` and `TinyCLI_Parse`.
+   - In `capture.c`: Replaced 110 lines of manual string parsing in `ParseCommandLine` with declarative `TinyCLI_CheckHelp` and `TinyCLI_Parse`, removing duplicate arrays in `WinMain`.
+   - In `ip-send.c`: Replaced 3 separate copies of argument parsing (`helpOpts` in `WinMain`, manual loop in `ParseCommandLine`, manual loop in `WM_COPYDATA`) with a unified `ParseCommandLine` call reusing a single options table.
+
+### Verification
+- Audited all 10 tools with regex counting: exactly 1 `CliOption` array exists per tool.
+- Verified build and `--help` output across all 10 utilities with clean exit code 0:
+  - `mouse-spotlight` (11 lines, exit code 0)
+  - `pin-to-top` (13 lines, exit code 0)
+  - `window-switcher` (19 lines, exit code 0)
+  - `ocr` (14 lines, exit code 0)
+  - `find-my-mouse` (9 lines, exit code 0)
+  - `color-picker` (11 lines, exit code 0)
+  - `pixel-view` (14 lines, exit code 0)
+  - `context-menu` (11 lines, exit code 0)
+  - `ip-send` (17 lines, exit code 0)
+  - `capture` (19 lines, exit code 0)
+

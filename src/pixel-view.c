@@ -6,6 +6,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <wchar.h>
+#include "common/tiny_cli.h"
 #include "common/tiny_gui.h"
 #include "common/tiny_dpi.h"
 
@@ -698,60 +699,107 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
     return DefWindowProcW(hWnd, msg, wParam, lParam);
 }
 
-static void ParseArgs(int argc, wchar_t** argv) {
-    for (int i = 1; i < argc; i++) {
-        if (wcscmp(argv[i], L"--file") == 0 && i + 1 < argc) {
-            wcscpy_s(g_config.filePath, MAX_PATH, argv[i + 1]);
-            i++;
-        } else if (wcscmp(argv[i], L"--bg") == 0 && i + 1 < argc) {
-            if (wcscmp(argv[i + 1], L"transparent") == 0) g_config.bgMode = BG_TRANSPARENT;
-            else if (wcscmp(argv[i + 1], L"solid") == 0) g_config.bgMode = BG_SOLID;
-            else if (wcscmp(argv[i + 1], L"gradient") == 0) g_config.bgMode = BG_LINEAR_GRADIENT;
-            else if (wcscmp(argv[i + 1], L"pixelated") == 0) g_config.bgMode = BG_PIXELATED_GRADIENT;
-            i++;
-        } else if (wcscmp(argv[i], L"--pixel-size") == 0 && i + 1 < argc) {
-            int sz = _wtoi(argv[i + 1]);
-            if (sz >= 1 && sz <= 64) {
-                g_config.pixelScale = sz;
-                g_config.fixedGridW = 0;
-                g_config.fixedGridH = 0;
-            }
-            i++;
-        } else if (wcscmp(argv[i], L"--ratio") == 0 && i + 1 < argc) {
-            int w = 0, h = 0;
-            if (swscanf_s(argv[i + 1], L"%dx%d", &w, &h) == 2 || swscanf_s(argv[i + 1], L"%dX%d", &w, &h) == 2) {
-                if (w >= 50 && h >= 50) {
-                    g_config.initWidth = w;
-                    g_config.initHeight = h;
-                    g_config.hasRatio = true;
-                }
-            } else if (swscanf_s(argv[i + 1], L"%d", &w) == 1 && w >= 50) {
+static bool ParseArgs(int argc, wchar_t** argv) {
+    const wchar_t *cliFile = NULL;
+    const wchar_t *cliBg = NULL;
+    int cliPixelSize = 0;
+    const wchar_t *cliRatio = NULL;
+    const wchar_t *cliGrid = NULL;
+
+    const CliOption opts[] = {
+        { L"--file",       CLI_OPT_STRING, &cliFile,      0,  0,  L"<path>",                                L"Image or GIF file path to view" },
+        { L"--bg",         CLI_OPT_STRING, &cliBg,        0,  0,  L"pixelated|gradient|solid|transparent", L"Background style (default: pixelated)" },
+        { L"--pixel-size", CLI_OPT_INT,    &cliPixelSize, 1, 64, L"<1-64>",                                L"Chunky pixel block size in screen pixels (default: 2)" },
+        { L"--ratio",      CLI_OPT_STRING, &cliRatio,     0,  0,  L"<WxH>",                                 L"Initial window size or aspect ratio (e.g. 400x400)" },
+        { L"--grid",       CLI_OPT_STRING, &cliGrid,      0,  0,  L"<WxH>",                                 L"Retro console fixed resolution grid (e.g. 320x200)" },
+    };
+
+    if (TinyCLI_CheckHelp(argc, argv,
+            L"Pixel View",
+            L"Retro chunky pixel art & detail-preserving image/GIF viewer",
+            L"pixel-view.exe [--file <path>] [--pixel-size <1-64>] [--bg transparent|solid|gradient|pixelated] [--ratio <WxH>] [--grid <WxH>] [<path>]",
+            opts, sizeof(opts) / sizeof(opts[0]))) {
+        return false;
+    }
+
+    TinyCLI_Parse(argc, argv, opts, sizeof(opts) / sizeof(opts[0]));
+
+    if (cliFile) {
+        wcscpy_s(g_config.filePath, MAX_PATH, cliFile);
+    }
+    if (cliBg) {
+        if (_wcsicmp(cliBg, L"transparent") == 0) g_config.bgMode = BG_TRANSPARENT;
+        else if (_wcsicmp(cliBg, L"solid") == 0) g_config.bgMode = BG_SOLID;
+        else if (_wcsicmp(cliBg, L"gradient") == 0) g_config.bgMode = BG_LINEAR_GRADIENT;
+        else if (_wcsicmp(cliBg, L"pixelated") == 0) g_config.bgMode = BG_PIXELATED_GRADIENT;
+    }
+    if (cliPixelSize >= 1 && cliPixelSize <= 64) {
+        g_config.pixelScale = cliPixelSize;
+        g_config.fixedGridW = 0;
+        g_config.fixedGridH = 0;
+    }
+    if (cliRatio) {
+        int w = 0, h = 0;
+        if (swscanf_s(cliRatio, L"%dx%d", &w, &h) == 2 || swscanf_s(cliRatio, L"%dX%d", &w, &h) == 2) {
+            if (w >= 50 && h >= 50) {
                 g_config.initWidth = w;
-                g_config.initHeight = w;
+                g_config.initHeight = h;
                 g_config.hasRatio = true;
             }
-            i++;
-        } else if (wcscmp(argv[i], L"--grid") == 0 && i + 1 < argc) {
-            int gw = 0, gh = 0;
-            if (swscanf_s(argv[i + 1], L"%dx%d", &gw, &gh) == 2 || swscanf_s(argv[i + 1], L"%dX%d", &gw, &gh) == 2) {
-                if (gw >= 16 && gh >= 16 && gw <= 1024 && gh <= 1024) {
-                    g_config.fixedGridW = gw;
-                    g_config.fixedGridH = gh;
-                }
-            } else if (swscanf_s(argv[i + 1], L"%d", &gw) == 1 && gw >= 16 && gw <= 1024) {
-                g_config.fixedGridW = gw;
-                g_config.fixedGridH = gw;
-            }
-            i++;
-        } else if (argv[i][0] != L'-' && g_config.filePath[0] == L'\0') {
-            wcscpy_s(g_config.filePath, MAX_PATH, argv[i]);
+        } else if (swscanf_s(cliRatio, L"%d", &w) == 1 && w >= 50) {
+            g_config.initWidth = w;
+            g_config.initHeight = w;
+            g_config.hasRatio = true;
         }
     }
+    if (cliGrid) {
+        int gw = 0, gh = 0;
+        if (swscanf_s(cliGrid, L"%dx%d", &gw, &gh) == 2 || swscanf_s(cliGrid, L"%dX%d", &gw, &gh) == 2) {
+            if (gw >= 16 && gh >= 16 && gw <= 1024 && gh <= 1024) {
+                g_config.fixedGridW = gw;
+                g_config.fixedGridH = gh;
+            }
+        } else if (swscanf_s(cliGrid, L"%d", &gw) == 1 && gw >= 16 && gw <= 1024) {
+            g_config.fixedGridW = gw;
+            g_config.fixedGridH = gw;
+        }
+    }
+
+    // Positional argument -> File path if not already set by --file
+    if (g_config.filePath[0] == L'\0') {
+        for (int i = 1; i < argc; i++) {
+            if (argv[i][0] != L'-') {
+                bool isOptionVal = false;
+                if (i > 1 && argv[i - 1][0] == L'-') {
+                    for (size_t o = 0; o < sizeof(opts)/sizeof(opts[0]); o++) {
+                        if (_wcsicmp(argv[i - 1], opts[o].name) == 0 && opts[o].type != CLI_OPT_BOOL) {
+                            isOptionVal = true;
+                            break;
+                        }
+                    }
+                }
+                if (!isOptionVal) {
+                    wcscpy_s(g_config.filePath, MAX_PATH, argv[i]);
+                    break;
+                }
+            }
+        }
+    }
+    return true;
 }
 
 int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR lpCmdLine, int nCmdShow) {
     (void)hPrevInstance;
     (void)lpCmdLine;
+    (void)nCmdShow;
+
+    wchar_t cmdBuf[2048];
+    wcsncpy_s(cmdBuf, sizeof(cmdBuf)/sizeof(cmdBuf[0]), GetCommandLineW(), _TRUNCATE);
+    wchar_t *argv[TINY_CLI_MAX_ARGS];
+    int argc = TinyCLI_Tokenize(cmdBuf, argv, TINY_CLI_MAX_ARGS);
+    if (!ParseArgs(argc, argv)) {
+        return 0;
+    }
 
     // IPC Single-Instance Toggle check
     g_hMutex = CreateMutexW(NULL, FALSE, L"Global\\TinyPixelViewMutex");
@@ -771,13 +819,6 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR lpCmdLi
     if (!InitWIC()) {
         MessageBoxW(NULL, L"Failed to initialize Windows Imaging Component (WIC).", L"Error", MB_OK | MB_ICONERROR);
         return 1;
-    }
-
-    int argc = 0;
-    wchar_t** argv = CommandLineToArgvW(GetCommandLineW(), &argc);
-    if (argv) {
-        ParseArgs(argc, argv);
-        LocalFree(argv);
     }
 
     WNDCLASSEXW wc = { 0 };

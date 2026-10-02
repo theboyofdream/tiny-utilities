@@ -58,7 +58,8 @@ F12::
     now := A_TickCount
 
     if (now - lastPress < 300)
-        Run(".\find-my-mouse.exe")
+        Run(".\mouse-spotlight.exe -s 90 -d 81")
+        ; Run(".\find-my-mouse.exe")
 
     lastPress := now
 }
@@ -146,4 +147,4 @@ OCRSnip() {
 ; Win + Ctrl + O = snip → OCR → clipboard
 #^O::OCRSnip()
 
-!Tab::Run(".\window-switcher.exe -bg blur --blur 40 -l center -s recent -a -sw 0")
+!Tab::Run(".\window-switcher.exe -bg blur --blur 30 -l center -s recent -a -sw 0")

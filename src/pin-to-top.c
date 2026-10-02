@@ -72,9 +72,9 @@ static bool g_pickerActive = false;
 /* CLI parsing                                                         */
 /* ------------------------------------------------------------------ */
 
-static Config BuildConfig(void)
+static bool BuildConfig(Config *cfg)
 {
-    Config cfg = {DEFAULT_BORDER_WIDTH, DEFAULT_MAX_WINDOWS, true};
+    *cfg = (Config){DEFAULT_BORDER_WIDTH, DEFAULT_MAX_WINDOWS, true};
 
     bool noPicker = false;
     bool noWinSelFlag = false;
@@ -83,61 +83,40 @@ static Config BuildConfig(void)
     const wchar_t *winSelStr = NULL;
 
     const CliOption opts[] = {
-        { L"--border-width",        CLI_OPT_INT,    &cfg.borderWidth, BORDER_MIN, BORDER_MAX },
-        { L"-b",                    CLI_OPT_INT,    &cfg.borderWidth, BORDER_MIN, BORDER_MAX },
-        { L"--max-windows",         CLI_OPT_INT,    &cfg.maxWindows,  MAXWINDOWS_MIN, MAXWINDOWS_MAX },
-        { L"-m",                    CLI_OPT_INT,    &cfg.maxWindows,  MAXWINDOWS_MIN, MAXWINDOWS_MAX },
-        { L"--window-selection",    CLI_OPT_STRING, &winSelStr,       0, 0 },
-        { L"--no-picker",           CLI_OPT_BOOL,   &noPicker,        0, 0 },
-        { L"--no-window-selection", CLI_OPT_BOOL,   &noWinSelFlag,    0, 0 },
-        { L"--active",              CLI_OPT_BOOL,   &activeFlag,      0, 0 },
-        { L"--foreground",          CLI_OPT_BOOL,   &foregroundFlag,  0, 0 },
+        { L"--border-width",        CLI_OPT_INT,    &cfg->borderWidth, BORDER_MIN,     BORDER_MAX,     L"<1-20>",       L"Border overlay thickness (default: 2)" },
+        { L"-b",                    CLI_OPT_INT,    &cfg->borderWidth, BORDER_MIN,     BORDER_MAX,     NULL,            NULL },
+        { L"--max-windows",         CLI_OPT_INT,    &cfg->maxWindows,  MAXWINDOWS_MIN, MAXWINDOWS_MAX, L"<1-10>",       L"Maximum pinned windows (default: 1)" },
+        { L"-m",                    CLI_OPT_INT,    &cfg->maxWindows,  MAXWINDOWS_MIN, MAXWINDOWS_MAX, NULL,            NULL },
+        { L"--window-selection",    CLI_OPT_STRING, &winSelStr,       0,              0,              L"<true|false>", L"Enable or disable interactive window picker (default: true)" },
+        { L"--no-picker",           CLI_OPT_BOOL,   &noPicker,        0,              0,              NULL,            L"Pin active foreground window immediately" },
+        { L"--no-window-selection", CLI_OPT_BOOL,   &noWinSelFlag,    0,              0,              NULL,            NULL },
+        { L"--active",              CLI_OPT_BOOL,   &activeFlag,      0,              0,              NULL,            NULL },
+        { L"--foreground",          CLI_OPT_BOOL,   &foregroundFlag,  0,              0,              NULL,            NULL },
     };
+
+    if (TinyCLI_CheckHelpCommandLine(
+            L"pin-to-top",
+            L"Pin windows always on top with accent border overlays",
+            L"pin-to-top [--border-width <1-20>] [--max-windows <1-10>] [--window-selection <true|false>] [--no-picker]",
+            opts, sizeof(opts) / sizeof(opts[0]))) {
+        return false;
+    }
 
     TinyCLI_ParseCommandLine(opts, sizeof(opts) / sizeof(opts[0]));
 
     if (winSelStr != NULL) {
         if (_wcsicmp(winSelStr, L"false") == 0 || _wcsicmp(winSelStr, L"0") == 0) {
-            cfg.windowSelection = false;
+            cfg->windowSelection = false;
         } else if (_wcsicmp(winSelStr, L"true") == 0 || _wcsicmp(winSelStr, L"1") == 0) {
-            cfg.windowSelection = true;
+            cfg->windowSelection = true;
         }
     }
 
     if (noPicker || noWinSelFlag || activeFlag || foregroundFlag) {
-        cfg.windowSelection = false;
+        cfg->windowSelection = false;
     }
 
-    /* Support legacy --key=val format if passed */
-    const wchar_t *rawCmd = GetCommandLineW();
-    if (rawCmd) {
-        wchar_t buf[2048];
-        wcsncpy_s(buf, sizeof(buf) / sizeof(buf[0]), rawCmd, _TRUNCATE);
-        wchar_t *argv[TINY_CLI_MAX_ARGS];
-        int argc = TinyCLI_Tokenize(buf, argv, TINY_CLI_MAX_ARGS);
-        for (int i = 1; i < argc; i++) {
-            if (_wcsnicmp(argv[i], L"--border-width=", 15) == 0) {
-                int val = _wtoi(argv[i] + 15);
-                if (val < BORDER_MIN) val = BORDER_MIN;
-                if (val > BORDER_MAX) val = BORDER_MAX;
-                cfg.borderWidth = val;
-            } else if (_wcsnicmp(argv[i], L"--max-windows=", 14) == 0) {
-                int val = _wtoi(argv[i] + 14);
-                if (val < MAXWINDOWS_MIN) val = MAXWINDOWS_MIN;
-                if (val > MAXWINDOWS_MAX) val = MAXWINDOWS_MAX;
-                cfg.maxWindows = val;
-            } else if (_wcsnicmp(argv[i], L"--window-selection=", 19) == 0) {
-                const wchar_t *val = argv[i] + 19;
-                if (_wcsicmp(val, L"false") == 0 || _wcsicmp(val, L"0") == 0) {
-                    cfg.windowSelection = false;
-                } else {
-                    cfg.windowSelection = true;
-                }
-            }
-        }
-    }
-
-    return cfg;
+    return true;
 }
 
 /* ------------------------------------------------------------------ */
@@ -686,8 +665,12 @@ static void HandleToggle(void)
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow)
 {
     (void)hInstance; (void)hPrevInstance; (void)lpCmdLine; (void)nCmdShow;
+
+    if (!BuildConfig(&g_cfg)) {
+        return 0;
+    }
+
     TinyDPI_EnablePerMonitorAwareness();
-    g_cfg = BuildConfig();
 
     HANDLE hEvent = NULL;
     if (!TinyIPC_AcquireOrToggle(APPMUTEX_NAME, APPEVENT_NAME, &hEvent)) {

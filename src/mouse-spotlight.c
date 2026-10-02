@@ -198,6 +198,24 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR lpCmdLi
     (void)lpCmdLine;
     (void)nCmdShow;
 
+    int cliSize = DEFAULT_SIZE;
+    int cliDim = DEFAULT_DIM;
+
+    CliOption opts[] = {
+        { L"--size", CLI_OPT_INT, &cliSize, MIN_SIZE, MAX_SIZE, L"<radius>", L"Spotlight base radius in pixels (20..1000, default 100)" },
+        { L"-s",     CLI_OPT_INT, &cliSize, MIN_SIZE, MAX_SIZE, NULL,        NULL },
+        { L"--dim",  CLI_OPT_INT, &cliDim,  0,        255,      L"<0-100|0-255>", L"Dim level percentage or 0..255 alpha (default 65)" },
+        { L"-d",     CLI_OPT_INT, &cliDim,  0,        255,      NULL,        NULL }
+    };
+
+    if (TinyCLI_CheckHelpCommandLine(
+            L"mouse-spotlight",
+            L"Presentation spotlight overlay around cursor",
+            L"mouse-spotlight [--size <radius>] [--dim <opacity>]",
+            opts, sizeof(opts) / sizeof(opts[0]))) {
+        return 0;
+    }
+
     /* 1. IPC Single-Instance Toggle check */
     HANDLE hEvent = NULL;
     if (!TinyIPC_AcquireOrToggle(APPMUTEX_NAME, APPEVENT_NAME, &hEvent)) {
@@ -208,15 +226,6 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR lpCmdLi
     TinyDPI_EnablePerMonitorAwareness();
 
     /* 3. CLI Argument Parsing */
-    int cliSize = DEFAULT_SIZE;
-    int cliDim = DEFAULT_DIM;
-
-    CliOption opts[] = {
-        { L"--size", CLI_OPT_INT, &cliSize, MIN_SIZE, MAX_SIZE },
-        { L"-s",     CLI_OPT_INT, &cliSize, MIN_SIZE, MAX_SIZE },
-        { L"--dim",  CLI_OPT_INT, &cliDim,  0, 255 },
-        { L"-d",     CLI_OPT_INT, &cliDim,  0, 255 }
-    };
     TinyCLI_ParseCommandLine(opts, sizeof(opts) / sizeof(opts[0]));
 
     if (cliSize < MIN_SIZE) cliSize = MIN_SIZE;

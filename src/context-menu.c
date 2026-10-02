@@ -15,6 +15,7 @@
 #include <string.h>
 #include <wchar.h>
 #include <stdbool.h>
+#include "common/tiny_cli.h"
 
 #define MUTEX_NAME L"Global\\TinyContextMenuMutex"
 #define EVENT_NAME L"Global\\TinyContextMenuEvent"
@@ -1048,53 +1049,57 @@ static bool gui_select_save_file(wchar_t* out_path, DWORD max_path) {
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow) {
     (void)hInstance; (void)hPrevInstance; (void)lpCmdLine; (void)nCmdShow;
 
-    // CLI Arguments Check
-    int argc = 0;
-    wchar_t** argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+    const wchar_t *cliUpdate = NULL;
+    const wchar_t *cliBackup = NULL;
+
+    const CliOption opts[] = {
+        { L"--update", CLI_OPT_STRING, &cliUpdate, 0, 0, L"<config.xml>", L"Apply context menu definitions from XML file" },
+        { L"-u",       CLI_OPT_STRING, &cliUpdate, 0, 0, NULL,            NULL },
+        { L"--backup", CLI_OPT_STRING, &cliBackup, 0, 0, L"<backup.xml>", L"Export managed context menu entries to XML file" },
+        { L"-b",       CLI_OPT_STRING, &cliBackup, 0, 0, NULL,            NULL },
+    };
+
+    if (TinyCLI_CheckHelpCommandLine(
+            L"Context Menu Manager",
+            L"Per-user Windows Explorer context menu manager & backup utility",
+            L"context-menu.exe [--update <config.xml> | --backup <backup.xml>]",
+            opts, sizeof(opts) / sizeof(opts[0]))) {
+        return 0;
+    }
+
+    wchar_t cmdBuf[2048];
+    wcsncpy_s(cmdBuf, sizeof(cmdBuf) / sizeof(cmdBuf[0]), GetCommandLineW(), _TRUNCATE);
+    wchar_t *argv[TINY_CLI_MAX_ARGS];
+    int argc = TinyCLI_Tokenize(cmdBuf, argv, TINY_CLI_MAX_ARGS);
 
     if (argc > 1) {
         g_cli_mode = true;
         AttachConsole(ATTACH_PARENT_PROCESS);
 
-        wchar_t* action_mode = NULL;
-        wchar_t* file_arg = NULL;
+        TinyCLI_Parse(argc, argv, opts, sizeof(opts) / sizeof(opts[0]));
 
-        for (int i = 1; i < argc; i++) {
-            if (_wcsicmp(argv[i], L"--update") == 0 || _wcsicmp(argv[i], L"-u") == 0) {
-                action_mode = L"update";
-                if (i + 1 < argc) file_arg = argv[++i];
-            } else if (_wcsicmp(argv[i], L"--backup") == 0 || _wcsicmp(argv[i], L"-b") == 0) {
-                action_mode = L"backup";
-                if (i + 1 < argc) file_arg = argv[++i];
-            }
-        }
-
-        if (!action_mode || !file_arg) {
+        if (!cliUpdate && !cliBackup) {
             fwprintf(stderr, L"Usage:\n");
             fwprintf(stderr, L"  context-menu.exe --update <config.xml>\n");
             fwprintf(stderr, L"  context-menu.exe --backup <backup.xml>\n");
-            LocalFree(argv);
             return 1;
         }
 
         bool success = false;
-        if (_wcsicmp(action_mode, L"update") == 0) {
-            success = do_update(file_arg);
+        if (cliUpdate) {
+            success = do_update(cliUpdate);
             if (!success) {
                 log_error(g_last_error[0] ? g_last_error : L"Failed to update context menu.");
             }
-        } else if (_wcsicmp(action_mode, L"backup") == 0) {
-            success = do_backup(file_arg);
+        } else if (cliBackup) {
+            success = do_backup(cliBackup);
             if (!success) {
                 log_error(g_last_error[0] ? g_last_error : L"Failed to backup context menu.");
             }
         }
 
-        LocalFree(argv);
         return success ? 0 : 1;
     }
-
-    LocalFree(argv);
 
     // Double-Click Flow (GUI mode) — Single Instance Mutex Check
     g_h_mutex = CreateMutexW(NULL, FALSE, MUTEX_NAME);

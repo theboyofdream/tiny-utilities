@@ -565,6 +565,36 @@ static bool RunOCR(const wchar_t *imagePath, const wchar_t *lang, int psm, int o
 
 int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR lpCmdLine, int nCmdShow)
 {
+    (void)hInstance;
+    (void)hPrevInstance;
+    (void)lpCmdLine;
+    (void)nCmdShow;
+
+    const wchar_t *imageArg = NULL;
+    const wchar_t *langArg = L"eng";
+    int psmArg = 6;
+    int oemArg = 1;
+    bool versionArg = false;
+
+    const CliOption opts[] = {
+        { L"--image",   CLI_OPT_STRING, &imageArg,   0,  0,  L"<path>",     L"Path to input image file (PNG/JPG/BMP/TIFF)" },
+        { L"-i",        CLI_OPT_STRING, &imageArg,   0,  0,  NULL,          NULL },
+        { L"--lang",    CLI_OPT_STRING, &langArg,    0,  0,  L"<lang>",     L"OCR language (e.g. eng, deu, chi_sim; default: eng)" },
+        { L"-l",        CLI_OPT_STRING, &langArg,    0,  0,  NULL,          NULL },
+        { L"--psm",     CLI_OPT_INT,    &psmArg,     0, 13,  L"<0-13>",     L"Page segmentation mode (default: 6)" },
+        { L"--oem",     CLI_OPT_INT,    &oemArg,     0,  3,  L"<0-3>",      L"OCR Engine Mode (default: 1)" },
+        { L"--version", CLI_OPT_BOOL,   &versionArg, 0,  0,  NULL,          L"Show version information" },
+        { L"-v",        CLI_OPT_BOOL,   &versionArg, 0,  0,  NULL,          NULL },
+    };
+
+    if (TinyCLI_CheckHelpCommandLine(
+            L"ocr",
+            L"Extract text from images using portable Tesseract OCR engine",
+            L"ocr [--image <path>] [--lang <lang>] [--psm <0-13>] [--oem <0-3>]",
+            opts, sizeof(opts) / sizeof(opts[0]))) {
+        return 0;
+    }
+
     EnsureConsoleAttached();
     CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
 
@@ -574,35 +604,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR lpCmdLi
     wchar_t *argv[TINY_CLI_MAX_ARGS];
     int argc = TinyCLI_Tokenize(cmdBuf, argv, TINY_CLI_MAX_ARGS);
 
-    const wchar_t *imageArg = NULL;
-    const wchar_t *langArg = L"eng";
-    int psmArg = 6;
-    int oemArg = 1;
-    bool helpArg = false;
-    bool versionArg = false;
-
-    const CliOption opts[] = {
-        { L"--image",   CLI_OPT_STRING, &imageArg,   0,  0 },
-        { L"-i",        CLI_OPT_STRING, &imageArg,   0,  0 },
-        { L"--lang",    CLI_OPT_STRING, &langArg,    0,  0 },
-        { L"-l",        CLI_OPT_STRING, &langArg,    0,  0 },
-        { L"--psm",     CLI_OPT_INT,    &psmArg,     0, 13 },
-        { L"--oem",     CLI_OPT_INT,    &oemArg,     0,  3 },
-        { L"--help",    CLI_OPT_BOOL,   &helpArg,    0,  0 },
-        { L"-h",        CLI_OPT_BOOL,   &helpArg,    0,  0 },
-        { L"--version", CLI_OPT_BOOL,   &versionArg, 0,  0 },
-        { L"-v",        CLI_OPT_BOOL,   &versionArg, 0,  0 }
-    };
-
     TinyCLI_Parse(argc, argv, opts, sizeof(opts) / sizeof(opts[0]));
-
-    if (helpArg) {
-        fwprintf(stderr, L"ocr.exe - tiny Windows OCR utility\n");
-        fwprintf(stderr, L"Usage: ocr.exe [--image] <image> [--lang eng|auto] [--psm 6] [--oem 1]\n");
-        fwprintf(stderr, L"       ocr.exe  (launches native file picker if no image passed)\n");
-        CoUninitialize();
-        return 0;
-    }
 
     if (versionArg) {
         fwprintf(stderr, L"ocr.exe 1.1.0 (Win32 Tesseract OCR)\n");

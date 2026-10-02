@@ -13,6 +13,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <wchar.h>
+#include "common/tiny_cli.h"
 #include "common/tiny_gui.h"
 #include "common/tiny_dpi.h"
 #include "common/font.h"
@@ -71,65 +72,7 @@ static COLORREF g_lastColor = RGB(0, 0, 0);
 static int g_tooltipW = 220;
 static int g_tooltipH = 90;
 
-/* ------------------------------------------------------------------ */
-/* CLI parsing                                                         */
-/* ------------------------------------------------------------------ */
 
-#define MAX_ARGV 64
-
-static int SplitCommandLine(wchar_t *buf, wchar_t **argv, int max)
-{
-    int n = 0;
-    wchar_t *p = buf;
-    for (;;) {
-        while (*p == L' ' || *p == L'\t')
-            p++;
-        if (*p == L'\0')
-            break;
-        if (n >= max)
-            break;
-        if (*p == L'"') {
-            p++;
-            argv[n++] = p;
-            while (*p != L'\0' && *p != L'"')
-                p++;
-            if (*p == L'"')
-                *p++ = L'\0';
-        } else {
-            argv[n++] = p;
-            while (*p != L'\0' && *p != L' ' && *p != L'\t')
-                p++;
-            if (*p != L'\0')
-                *p++ = L'\0';
-        }
-    }
-    return n;
-}
-
-static void ParseCommandLine(int argc, wchar_t **argv, Config *cfg)
-{
-    for (int i = 1; i < argc; i++) {
-        if (_wcsicmp(argv[i], L"--format") == 0 && i + 1 < argc) {
-            i++;
-            if (_wcsicmp(argv[i], L"hex") == 0) cfg->format = FMT_HEX;
-            else if (_wcsicmp(argv[i], L"rgb") == 0) cfg->format = FMT_RGB;
-            else if (_wcsicmp(argv[i], L"hsl") == 0) cfg->format = FMT_HSL;
-            else if (_wcsicmp(argv[i], L"cmyk") == 0) cfg->format = FMT_CMYK;
-        } else if (_wcsnicmp(argv[i], L"--format=", 9) == 0) {
-            const wchar_t *f = argv[i] + 9;
-            if (_wcsicmp(f, L"hex") == 0) cfg->format = FMT_HEX;
-            else if (_wcsicmp(f, L"rgb") == 0) cfg->format = FMT_RGB;
-            else if (_wcsicmp(f, L"hsl") == 0) cfg->format = FMT_HSL;
-            else if (_wcsicmp(f, L"cmyk") == 0) cfg->format = FMT_CMYK;
-        } else if (_wcsicmp(argv[i], L"--font-size") == 0 && i + 1 < argc) {
-            int sz = _wtoi(argv[++i]);
-            if (sz >= FONT_MIN && sz <= FONT_MAX) cfg->fontSize = sz;
-        } else if (_wcsnicmp(argv[i], L"--font-size=", 12) == 0) {
-            int sz = _wtoi(argv[i] + 12);
-            if (sz >= FONT_MIN && sz <= FONT_MAX) cfg->fontSize = sz;
-        }
-    }
-}
 
 /* ------------------------------------------------------------------ */
 /* Color formatting helpers                                           */
@@ -587,26 +530,39 @@ static void DestroyOverlay(void)
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
                    LPSTR lpCmdLine, int nCmdShow)
 {
-    int argc = 0;
-    wchar_t argBuf[4096];
-    wchar_t *argv[MAX_ARGV];
-    HANDLE mutex;
-    HANDLE ev;
-
     (void)hInstance;
     (void)hPrevInstance;
     (void)lpCmdLine;
     (void)nCmdShow;
 
+    const wchar_t *formatArg = NULL;
+    const CliOption opts[] = {
+        { L"--format",    CLI_OPT_STRING, &formatArg,      0,        0,        L"hex|rgb|hsl|cmyk", L"Default color format copied on click (default: hex)" },
+        { L"--output",    CLI_OPT_STRING, &formatArg,      0,        0,        NULL,                NULL },
+        { L"--font-size", CLI_OPT_INT,    &g_cfg.fontSize, FONT_MIN, FONT_MAX, L"<8-32>",           L"Tooltip font size in points (default: 10)" },
+    };
+
+    if (TinyCLI_CheckHelpCommandLine(
+            L"ColorPicker",
+            L"Cursor color picker with live sampling & multi-format clipboard copy",
+            L"color-picker.exe [--format hex|rgb|hsl|cmyk] [--font-size <8-32>]",
+            opts, sizeof(opts) / sizeof(opts[0]))) {
+        return 0;
+    }
+
     TinyDPI_EnablePerMonitorAwareness();
+    TinyCLI_ParseCommandLine(opts, sizeof(opts) / sizeof(opts[0]));
 
-    lstrcpynW(argBuf, GetCommandLineW(), 4096);
-    argc = SplitCommandLine(argBuf, argv, MAX_ARGV);
-    ParseCommandLine(argc, argv, &g_cfg);
+    if (formatArg) {
+        if (_wcsicmp(formatArg, L"hex") == 0) g_cfg.format = FMT_HEX;
+        else if (_wcsicmp(formatArg, L"rgb") == 0) g_cfg.format = FMT_RGB;
+        else if (_wcsicmp(formatArg, L"hsl") == 0 || _wcsicmp(formatArg, L"hls") == 0) g_cfg.format = FMT_HSL;
+        else if (_wcsicmp(formatArg, L"cmyk") == 0) g_cfg.format = FMT_CMYK;
+    }
 
-    mutex = CreateMutexW(NULL, FALSE, APPMUTEX_NAME);
+    HANDLE mutex = CreateMutexW(NULL, FALSE, APPMUTEX_NAME);
     if (GetLastError() == ERROR_ALREADY_EXISTS) {
-        ev = OpenEventW(EVENT_MODIFY_STATE, FALSE, APPEVENT_NAME);
+        HANDLE ev = OpenEventW(EVENT_MODIFY_STATE, FALSE, APPEVENT_NAME);
         if (ev != NULL) {
             SetEvent(ev);
             CloseHandle(ev);
@@ -616,7 +572,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
         return 0;
     }
 
-    ev = CreateEventW(NULL, FALSE, FALSE, APPEVENT_NAME);
+    HANDLE ev = CreateEventW(NULL, FALSE, FALSE, APPEVENT_NAME);
     if (ev == NULL || !PrepareOverlay()) {
         if (ev != NULL)
             CloseHandle(ev);

@@ -10,6 +10,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <wchar.h>
+#include "common/tiny_cli.h"
 #include "common/tiny_dpi.h"
 #include "common/font.h"
 #include "common/clipboard.h"
@@ -511,104 +512,145 @@ static void InitRecipients(void) {
 }
 
 // Parse CLI arguments
-static void ParseCommandLine(AppState* state) {
-    int argc = 0;
-    LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
-    if (!argv) return;
+static bool ParseCommandLine(const wchar_t* cmdLine, AppState* state) {
+    if (!cmdLine) return true;
+    wchar_t cmdBuf[2048];
+    wcsncpy_s(cmdBuf, sizeof(cmdBuf)/sizeof(cmdBuf[0]), cmdLine, _TRUNCATE);
+    wchar_t* argv[TINY_CLI_MAX_ARGS];
+    int argc = TinyCLI_Tokenize(cmdBuf, argv, TINY_CLI_MAX_ARGS);
+    if (argc <= 0) return true;
 
-    for (int i = 1; i < argc; i++) {
-        if (_wcsicmp(argv[i], L"--context-menu") == 0) {
-            if (i + 1 < argc) {
-                if (_wcsicmp(argv[i + 1], L"register") == 0 || _wcsicmp(argv[i + 1], L"true") == 0 || wcscmp(argv[i + 1], L"1") == 0) {
-                    state->registerContextMenu = true;
-                    i++;
-                } else if (_wcsicmp(argv[i + 1], L"unregister") == 0 || _wcsicmp(argv[i + 1], L"false") == 0 || wcscmp(argv[i + 1], L"0") == 0) {
-                    state->unregisterContextMenu = true;
-                    i++;
-                } else if (argv[i + 1][0] == L'-') {
-                    state->registerContextMenu = true;
-                } else {
-                    state->registerContextMenu = true;
-                }
-            } else {
-                state->registerContextMenu = true;
-            }
-        } else if (_wcsicmp(argv[i], L"--register-context-menu") == 0 || _wcsicmp(argv[i], L"--register") == 0) {
+    const wchar_t* toArg = NULL;
+    const wchar_t* msgArg = NULL;
+    const wchar_t* themeArg = NULL;
+    const wchar_t* ctxMenuArg = NULL;
+    bool autoSend = false;
+    bool regCtx = false;
+    bool unregCtx = false;
+
+    const CliOption opts[] = {
+        { L"--to",                      CLI_OPT_STRING, &toArg,      0, 0, L"<recipients>",              L"Pre-select comma-separated recipient PC or user names" },
+        { L"-t",                        CLI_OPT_STRING, &toArg,      0, 0, NULL,                         NULL },
+        { L"--message",                 CLI_OPT_STRING, &msgArg,     0, 0, L"<text>",                    L"Pre-populate message body text" },
+        { L"--msg",                     CLI_OPT_STRING, &msgArg,     0, 0, NULL,                         NULL },
+        { L"-m",                        CLI_OPT_STRING, &msgArg,     0, 0, NULL,                         NULL },
+        { L"--file",                    CLI_OPT_STRING, NULL,        0, 0, L"<path>",                    L"Attach file or text snippet payload" },
+        { L"--theme",                   CLI_OPT_STRING, &themeArg,   0, 0, L"light|dark|system",         L"Theme mode (default: system)" },
+        { L"--send",                    CLI_OPT_BOOL,   &autoSend,   0, 0, NULL,                         L"Dispatch payload immediately via ipcmd without GUI" },
+        { L"--context-menu",            CLI_OPT_STRING, &ctxMenuArg, 0, 0, L"register|unregister",       L"Add or remove Explorer context menu entries" },
+        { L"--register-context-menu",   CLI_OPT_BOOL,   &regCtx,     0, 0, NULL,                         L"Register Explorer context menu entries" },
+        { L"--register",                CLI_OPT_BOOL,   &regCtx,     0, 0, NULL,                         NULL },
+        { L"--unregister-context-menu", CLI_OPT_BOOL,   &unregCtx,   0, 0, NULL,                         L"Unregister Explorer context menu entries" },
+        { L"--unregister",              CLI_OPT_BOOL,   &unregCtx,   0, 0, NULL,                         NULL },
+    };
+
+    if (TinyCLI_CheckHelp(argc, argv,
+            L"ip-send",
+            L"Terminal-inspired payload composer & dispatcher for IP Messenger",
+            L"ip-send.exe [--to <recipients>] [--message <text>] [--file <path>] [--theme light|dark|system] [--send] [<files...>]",
+            opts, sizeof(opts) / sizeof(opts[0]))) {
+        return false;
+    }
+
+    TinyCLI_Parse(argc, argv, opts, sizeof(opts) / sizeof(opts[0]));
+
+    if (autoSend) state->autoSend = true;
+    if (regCtx) state->registerContextMenu = true;
+    if (unregCtx) state->unregisterContextMenu = true;
+
+    if (ctxMenuArg) {
+        if (_wcsicmp(ctxMenuArg, L"register") == 0 || _wcsicmp(ctxMenuArg, L"true") == 0 || wcscmp(ctxMenuArg, L"1") == 0) {
             state->registerContextMenu = true;
-        } else if (_wcsicmp(argv[i], L"--unregister-context-menu") == 0 || _wcsicmp(argv[i], L"--unregister") == 0) {
+        } else if (_wcsicmp(ctxMenuArg, L"unregister") == 0 || _wcsicmp(ctxMenuArg, L"false") == 0 || wcscmp(ctxMenuArg, L"0") == 0) {
             state->unregisterContextMenu = true;
-        } else if (_wcsicmp(argv[i], L"--send") == 0) {
-            state->autoSend = true;
-        } else if ((_wcsicmp(argv[i], L"--to") == 0 || _wcsicmp(argv[i], L"-t") == 0) && i + 1 < argc) {
-            i++;
-            wchar_t toBuf[256];
-            wcscpy_s(toBuf, 256, argv[i]);
-            wchar_t* nextToken = NULL;
-            wchar_t* token = wcstok_s(toBuf, L",; ", &nextToken);
-            while (token) {
-                bool found = false;
-                for (int r = 0; r < state->recipientCount; r++) {
-                    if (_wcsicmp(state->recipients[r].name, token) == 0) {
-                        state->recipients[r].selected = true;
-                        found = true;
-                        break;
-                    }
-                }
-                if (!found && state->recipientCount < MAX_RECIPIENTS) {
-                    wcscpy_s(state->recipients[state->recipientCount].name, 128, token);
-                    wcscpy_s(state->recipients[state->recipientCount].hostName, 128, L"Custom");
-                    state->recipients[state->recipientCount].active = true;
-                    state->recipients[state->recipientCount].selected = true;
-                    state->recipientCount++;
-                }
-                token = wcstok_s(NULL, L",; ", &nextToken);
-            }
-        } else if ((_wcsicmp(argv[i], L"--message") == 0 || _wcsicmp(argv[i], L"--msg") == 0 || _wcsicmp(argv[i], L"-m") == 0) && i + 1 < argc) {
-            i++;
-            wcscpy_s(state->messageText, 1024, argv[i]);
-            state->messageLen = (int)wcslen(state->messageText);
-        } else if (_wcsicmp(argv[i], L"--file") == 0 && i + 1 < argc) {
-            i++;
-            AddFilePayload(argv[i]);
-        } else if (_wcsicmp(argv[i], L"--theme") == 0 && i + 1 < argc) {
-            i++;
-            if (_wcsicmp(argv[i], L"light") == 0) {
-                g_lightTheme = true;
-                g_themeManuallyToggled = true;
-            } else if (_wcsicmp(argv[i], L"dark") == 0) {
-                g_lightTheme = false;
-                g_themeManuallyToggled = true;
-            } else if (_wcsicmp(argv[i], L"system") == 0) {
-                g_lightTheme = IsSystemLightTheme();
-                g_themeManuallyToggled = false;
-            }
-        } else if (_wcsnicmp(argv[i], L"--theme=", 8) == 0) {
-            const wchar_t *val = argv[i] + 8;
-            if (_wcsicmp(val, L"light") == 0) {
-                g_lightTheme = true;
-                g_themeManuallyToggled = true;
-            } else if (_wcsicmp(val, L"dark") == 0) {
-                g_lightTheme = false;
-                g_themeManuallyToggled = true;
-            } else if (_wcsicmp(val, L"system") == 0) {
-                g_lightTheme = IsSystemLightTheme();
-                g_themeManuallyToggled = false;
-            }
-        } else if (argv[i][0] != L'-') {
-            // Positional argument -> File path
-            AddFilePayload(argv[i]);
+        } else {
+            state->registerContextMenu = true;
         }
     }
 
-    LocalFree(argv);
+    for (int i = 1; i < argc; i++) {
+        if (_wcsicmp(argv[i], L"--context-menu") == 0) {
+            if (i + 1 >= argc || argv[i + 1][0] == L'-') {
+                state->registerContextMenu = true;
+            }
+        }
+    }
+
+    if (themeArg) {
+        if (_wcsicmp(themeArg, L"light") == 0) {
+            g_lightTheme = true;
+            g_themeManuallyToggled = true;
+        } else if (_wcsicmp(themeArg, L"dark") == 0) {
+            g_lightTheme = false;
+            g_themeManuallyToggled = true;
+        } else if (_wcsicmp(themeArg, L"system") == 0) {
+            g_lightTheme = IsSystemLightTheme();
+            g_themeManuallyToggled = false;
+        }
+    }
+
+    if (msgArg) {
+        wcscpy_s(state->messageText, 1024, msgArg);
+        state->messageLen = (int)wcslen(state->messageText);
+    }
+
+    if (toArg) {
+        wchar_t toBuf[256];
+        wcscpy_s(toBuf, 256, toArg);
+        wchar_t* nextToken = NULL;
+        wchar_t* token = wcstok_s(toBuf, L",; ", &nextToken);
+        while (token) {
+            bool found = false;
+            for (int r = 0; r < state->recipientCount; r++) {
+                if (_wcsicmp(state->recipients[r].name, token) == 0) {
+                    state->recipients[r].selected = true;
+                    found = true;
+                    break;
+                }
+            }
+            if (!found && state->recipientCount < MAX_RECIPIENTS) {
+                wcscpy_s(state->recipients[state->recipientCount].name, 128, token);
+                wcscpy_s(state->recipients[state->recipientCount].hostName, 128, L"Custom");
+                state->recipients[state->recipientCount].active = true;
+                state->recipients[state->recipientCount].selected = true;
+                state->recipientCount++;
+            }
+            token = wcstok_s(NULL, L",; ", &nextToken);
+        }
+    }
+
+    for (int i = 1; i < argc; i++) {
+        if (_wcsicmp(argv[i], L"--file") == 0 && i + 1 < argc) {
+            AddFilePayload(argv[++i]);
+        } else if (_wcsnicmp(argv[i], L"--file=", 7) == 0) {
+            AddFilePayload(argv[i] + 7);
+        } else if (argv[i][0] != L'-') {
+            bool isVal = false;
+            if (i > 1 && argv[i - 1][0] == L'-') {
+                for (size_t o = 0; o < sizeof(opts)/sizeof(opts[0]); o++) {
+                    if (_wcsicmp(argv[i - 1], opts[o].name) == 0 && opts[o].type != CLI_OPT_BOOL) {
+                        isVal = true;
+                        break;
+                    }
+                }
+            }
+            if (!isVal) {
+                AddFilePayload(argv[i]);
+            }
+        }
+    }
+
     FilterRecipients();
+    return true;
 }
 
 // Check if current process was launched with payload/file arguments
 static bool HasPayloadArguments(void) {
-    int argc = 0;
-    LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
-    if (!argv) return false;
+    wchar_t cmdBuf[2048];
+    wcsncpy_s(cmdBuf, sizeof(cmdBuf)/sizeof(cmdBuf[0]), GetCommandLineW(), _TRUNCATE);
+    wchar_t* argv[TINY_CLI_MAX_ARGS];
+    int argc = TinyCLI_Tokenize(cmdBuf, argv, TINY_CLI_MAX_ARGS);
+    if (argc <= 0) return false;
     bool hasArgs = false;
     for (int i = 1; i < argc; i++) {
         if (_wcsicmp(argv[i], L"--context-menu") == 0 ||
@@ -638,7 +680,6 @@ static bool HasPayloadArguments(void) {
             break;
         }
     }
-    LocalFree(argv);
     return hasArgs;
 }
 
@@ -672,6 +713,9 @@ static void RemoveLegacyContextMenu(void) {
     RegDeleteKeyW(HKEY_CURRENT_USER, L"Software\\Classes\\Directory\\Background\\shell\\Send via IP-send");
 }
 
+// Forward declaration
+static bool FindIPMsgExecutable(wchar_t* outPath, DWORD maxLen);
+
 // Registry context menu registration
 static bool RegisterContextMenu(void) {
     RemoveLegacyContextMenu();
@@ -681,6 +725,21 @@ static bool RegisterContextMenu(void) {
 
     wchar_t cmdLine[MAX_PATH + 32];
     swprintf_s(cmdLine, MAX_PATH + 32, L"\"%s\" \"%%1\"", exePath);
+
+    // Resolve IP Messenger executable for context menu icon
+    wchar_t ipcmdPath[MAX_PATH] = { 0 };
+    wchar_t iconPath[MAX_PATH] = { 0 };
+    if (FindIPMsgExecutable(ipcmdPath, MAX_PATH)) {
+        wcscpy_s(iconPath, MAX_PATH, ipcmdPath);
+        wchar_t* pSlash = wcsrchr(iconPath, L'\\');
+        if (!pSlash) pSlash = wcsrchr(iconPath, L'/');
+        if (pSlash) {
+            wcscpy_s(pSlash + 1, MAX_PATH - (pSlash + 1 - iconPath), L"ipmsg.exe");
+            if (GetFileAttributesW(iconPath) == INVALID_FILE_ATTRIBUTES) {
+                wcscpy_s(iconPath, MAX_PATH, ipcmdPath);
+            }
+        }
+    }
 
     const wchar_t* subKeys[] = {
         L"Software\\Classes\\*\\shell\\Send via IP-send",
@@ -695,6 +754,9 @@ static bool RegisterContextMenu(void) {
     for (int i = 0; i < 2; i++) {
         if (RegCreateKeyExW(HKEY_CURRENT_USER, subKeys[i], 0, NULL, REG_OPTION_NON_VOLATILE, KEY_WRITE, NULL, &hKey, NULL) == ERROR_SUCCESS) {
             RegSetValueExW(hKey, NULL, 0, REG_SZ, (const BYTE*)L"Send via IP-send", (DWORD)(wcslen(L"Send via IP-send") + 1) * sizeof(wchar_t));
+            if (iconPath[0] != L'\0') {
+                RegSetValueExW(hKey, L"Icon", 0, REG_SZ, (const BYTE*)iconPath, (DWORD)(wcslen(iconPath) + 1) * sizeof(wchar_t));
+            }
             HKEY hCmd = NULL;
             if (RegCreateKeyExW(hKey, L"command", 0, NULL, REG_OPTION_NON_VOLATILE, KEY_WRITE, NULL, &hCmd, NULL) == ERROR_SUCCESS) {
                 RegSetValueExW(hCmd, NULL, 0, REG_SZ, (const BYTE*)cmdLine, (DWORD)(wcslen(cmdLine) + 1) * sizeof(wchar_t));
@@ -706,6 +768,9 @@ static bool RegisterContextMenu(void) {
 
     if (RegCreateKeyExW(HKEY_CURRENT_USER, bgSubKey, 0, NULL, REG_OPTION_NON_VOLATILE, KEY_WRITE, NULL, &hKey, NULL) == ERROR_SUCCESS) {
         RegSetValueExW(hKey, NULL, 0, REG_SZ, (const BYTE*)L"Send via IP-send", (DWORD)(wcslen(L"Send via IP-send") + 1) * sizeof(wchar_t));
+        if (iconPath[0] != L'\0') {
+            RegSetValueExW(hKey, L"Icon", 0, REG_SZ, (const BYTE*)iconPath, (DWORD)(wcslen(iconPath) + 1) * sizeof(wchar_t));
+        }
         HKEY hCmd = NULL;
         if (RegCreateKeyExW(hKey, L"command", 0, NULL, REG_OPTION_NON_VOLATILE, KEY_WRITE, NULL, &hCmd, NULL) == ERROR_SUCCESS) {
             RegSetValueExW(hCmd, NULL, 0, REG_SZ, (const BYTE*)bgCmdLine, (DWORD)(wcslen(bgCmdLine) + 1) * sizeof(wchar_t));
@@ -1568,73 +1633,9 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
         PCOPYDATASTRUCT pcds = (PCOPYDATASTRUCT)lParam;
         if (pcds && pcds->lpData && pcds->cbData >= sizeof(wchar_t)) {
             const wchar_t* incomingCmd = (const wchar_t*)pcds->lpData;
-            int argc = 0;
-            LPWSTR* argv = CommandLineToArgvW(incomingCmd, &argc);
-            if (argv) {
-                for (int i = 1; i < argc; i++) {
-                    if (_wcsicmp(argv[i], L"--file") == 0 && i + 1 < argc) {
-                        AddFilePayload(argv[++i]);
-                    } else if ((_wcsicmp(argv[i], L"--message") == 0 || _wcsicmp(argv[i], L"--msg") == 0 || _wcsicmp(argv[i], L"-m") == 0) && i + 1 < argc) {
-                        i++;
-                        wcscpy_s(g_state.messageText, 1024, argv[i]);
-                        g_state.messageLen = (int)wcslen(g_state.messageText);
-                        if (g_hEdit && IsWindow(g_hEdit)) {
-                            SetWindowTextW(g_hEdit, g_state.messageText);
-                        }
-                    } else if ((_wcsicmp(argv[i], L"--to") == 0 || _wcsicmp(argv[i], L"-t") == 0) && i + 1 < argc) {
-                        i++;
-                        wchar_t toBuf[256];
-                        wcscpy_s(toBuf, 256, argv[i]);
-                        wchar_t* nextToken = NULL;
-                        wchar_t* token = wcstok_s(toBuf, L",; ", &nextToken);
-                        while (token) {
-                            bool found = false;
-                            for (int r = 0; r < g_state.recipientCount; r++) {
-                                if (_wcsicmp(g_state.recipients[r].name, token) == 0) {
-                                    g_state.recipients[r].selected = true;
-                                    found = true;
-                                    break;
-                                }
-                            }
-                            if (!found && g_state.recipientCount < MAX_RECIPIENTS) {
-                                wcscpy_s(g_state.recipients[g_state.recipientCount].name, 128, token);
-                                wcscpy_s(g_state.recipients[g_state.recipientCount].hostName, 128, L"Custom");
-                                g_state.recipients[g_state.recipientCount].active = true;
-                                g_state.recipients[g_state.recipientCount].selected = true;
-                                g_state.recipientCount++;
-                            }
-                            token = wcstok_s(NULL, L",; ", &nextToken);
-                        }
-                        FilterRecipients();
-                    } else if (_wcsicmp(argv[i], L"--theme") == 0 && i + 1 < argc) {
-                        i++;
-                        if (_wcsicmp(argv[i], L"light") == 0) {
-                            g_lightTheme = true;
-                            g_themeManuallyToggled = true;
-                        } else if (_wcsicmp(argv[i], L"dark") == 0) {
-                            g_lightTheme = false;
-                            g_themeManuallyToggled = true;
-                        } else if (_wcsicmp(argv[i], L"system") == 0) {
-                            g_lightTheme = IsSystemLightTheme();
-                            g_themeManuallyToggled = false;
-                        }
-                    } else if (_wcsnicmp(argv[i], L"--theme=", 8) == 0) {
-                        const wchar_t *val = argv[i] + 8;
-                        if (_wcsicmp(val, L"light") == 0) {
-                            g_lightTheme = true;
-                            g_themeManuallyToggled = true;
-                        } else if (_wcsicmp(val, L"dark") == 0) {
-                            g_lightTheme = false;
-                            g_themeManuallyToggled = true;
-                        } else if (_wcsicmp(val, L"system") == 0) {
-                            g_lightTheme = IsSystemLightTheme();
-                            g_themeManuallyToggled = false;
-                        }
-                    } else if (argv[i][0] != L'-') {
-                        AddFilePayload(argv[i]);
-                    }
-                }
-                LocalFree(argv);
+            ParseCommandLine(incomingCmd, &g_state);
+            if (g_hEdit && IsWindow(g_hEdit)) {
+                SetWindowTextW(g_hEdit, g_state.messageText);
             }
             SetForegroundWindow(hWnd);
             InvalidateRect(hWnd, NULL, FALSE);
@@ -1886,6 +1887,22 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
 }
 
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow) {
+    (void)hInstance; (void)hPrevInstance; (void)lpCmdLine; (void)nCmdShow;
+
+    if (!ParseCommandLine(GetCommandLineW(), &g_state)) {
+        return 0;
+    }
+
+    if (g_state.registerContextMenu) {
+        RegisterContextMenu();
+        return 0;
+    }
+
+    if (g_state.unregisterContextMenu) {
+        UnregisterContextMenu();
+        return 0;
+    }
+
     TinyDPI_EnablePerMonitorAwareness();
 
     // Single instance Mutex & Event check
@@ -1927,22 +1944,6 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     // Initialize default state & recipients
     g_state.visibleRows = 4;
     InitRecipients();
-    ParseCommandLine(&g_state);
-
-    // Handle CLI context menu registration commands
-    if (g_state.registerContextMenu) {
-        RegisterContextMenu();
-        if (g_hEvent) CloseHandle(g_hEvent);
-        if (g_hMutex) CloseHandle(g_hMutex);
-        return 0;
-    }
-
-    if (g_state.unregisterContextMenu) {
-        UnregisterContextMenu();
-        if (g_hEvent) CloseHandle(g_hEvent);
-        if (g_hMutex) CloseHandle(g_hMutex);
-        return 0;
-    }
 
     // Auto-send CLI execution
     if (g_state.autoSend) {
