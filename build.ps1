@@ -7,7 +7,9 @@ param(
     [string]$Mode = 'release',
 
     [ValidateSet('x64', 'arm64')]
-    [string]$Arch = 'x64'
+    [string]$Arch = 'x64',
+
+    [switch]$Package
 )
 
 $ErrorActionPreference = 'Stop'
@@ -283,6 +285,36 @@ function Build-All([string]$BuildMode, [string]$BuildArch = 'x64') {
     }
 }
 
+function Package-Artifacts([string]$BuildMode, [string]$BuildArch = 'x64') {
+    $srcDir = if ($BuildArch -eq 'arm64') {
+        Join-Path (Join-Path $DIST $BuildMode.ToLower()) 'arm64'
+    } else {
+        Join-Path $DIST $BuildMode.ToLower()
+    }
+    $pkgDir = Join-Path (Join-Path $DIST 'packages') $BuildArch
+    New-Item -ItemType Directory -Path $pkgDir -Force | Out-Null
+
+    # 1. Clean bundle folder for all-in-one ZIP (un-suffixed .exe files + shortcuts.ahk)
+    $bundleDir = Join-Path (Join-Path $DIST 'bundle') $BuildArch
+    New-Item -ItemType Directory -Path $bundleDir -Force | Out-Null
+    Get-ChildItem -Path $srcDir -Filter "*.exe" | ForEach-Object {
+        Copy-Item $_.FullName "$bundleDir\$($_.Name)" -Force
+    }
+    $shortcuts = Join-Path (Join-Path $ROOT 'docs') 'shortcuts.ahk'
+    if (Test-Path $shortcuts) {
+        Copy-Item $shortcuts "$bundleDir\shortcuts.ahk" -Force
+    }
+    $zipPath = Join-Path $pkgDir "tiny-utilities-$BuildArch.zip"
+    if (Test-Path $zipPath) { Remove-Item $zipPath -Force }
+    Compress-Archive -Path "$bundleDir\*" -DestinationPath $zipPath
+
+    # 2. Individual standalone executables with arch suffix for single-file downloads
+    Get-ChildItem -Path $srcDir -Filter "*.exe" | ForEach-Object {
+        Copy-Item $_.FullName "$pkgDir\$($_.BaseName)-$BuildArch.exe" -Force
+    }
+    Write-Host "Packaged $BuildArch binaries & ZIP archive to: $pkgDir"
+}
+
 if (-not $Targets -or $Targets.Count -eq 0) {
     Write-Host "Build Mode: $Mode ($Arch)"
     Write-Host "1) all"
@@ -326,3 +358,7 @@ else {
 }
 
 Write-Host "Build complete ($Mode, $Arch)."
+
+if ($Package) {
+    Package-Artifacts $Mode $Arch
+}

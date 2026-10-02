@@ -1,8 +1,5 @@
 name: Release
 
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-
 on:
   push:
     branches:
@@ -36,41 +33,13 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Setup MSVC & Clang Toolchain (${{ matrix.arch }})
+      - name: Setup MSVC Toolchain (${{ matrix.arch }})
         uses: ilammy/msvc-dev-cmd@v1
         with:
           arch: ${{ matrix.msvc_arch }}
 
-      - name: Build All Utilities (${{ matrix.arch }})
-        shell: pwsh
-        run: |
-          $arch = '${{ matrix.arch }}'
-          Write-Host "Building all utilities for $arch..."
-          pwsh -File .\build.ps1 -Mode release -Arch $arch all
-
-          # Locate compiled binaries
-          $srcDir = if ($arch -eq 'arm64') { "dist\release\arm64" } else { "dist\release" }
-          $pkgDir = "dist\packages\$arch"
-          New-Item -ItemType Directory -Path $pkgDir -Force | Out-Null
-
-          # 1. Clean bundle folder for all-in-one ZIP (clean filenames without arch suffix so shortcuts.ahk works)
-          $bundleDir = "dist\bundle\$arch"
-          New-Item -ItemType Directory -Path $bundleDir -Force | Out-Null
-          Get-ChildItem -Path $srcDir -Filter "*.exe" | ForEach-Object {
-              Copy-Item $_.FullName "$bundleDir\$($_.Name)"
-          }
-          Copy-Item docs\shortcuts.ahk "$bundleDir\shortcuts.ahk"
-          Compress-Archive -Path "$bundleDir\*" -DestinationPath "$pkgDir\tiny-utilities-$arch.zip"
-
-          # 2. Individual standalone executables with arch suffix for single-file downloads
-          Get-ChildItem -Path $srcDir -Filter "*.exe" | ForEach-Object {
-              Copy-Item $_.FullName "$pkgDir\$($_.BaseName)-$arch.exe"
-          }
-
-          # 3. Pass version tag metadata to publish job
-          $rawVer = if (Test-Path VERSION) { (Get-Content VERSION -Raw).Trim() } else { "1.0.0" }
-          $verTag = if ($rawVer.StartsWith('v')) { $rawVer } else { "v$rawVer" }
-          Set-Content -Path "$pkgDir\VERSION" -Value $verTag
+      - name: Build & Package All Utilities (${{ matrix.arch }})
+        run: pwsh -File .\build.ps1 -Mode release -Arch ${{ matrix.arch }} -Package all
 
       - name: Upload Artifacts
         uses: actions/upload-artifact@v7
@@ -84,6 +53,9 @@ jobs:
     needs: build
     runs-on: windows-latest
     steps:
+      - name: Checkout Code
+        uses: actions/checkout@v7
+
       - name: Download All Artifacts
         uses: actions/download-artifact@v8
         with:
@@ -91,46 +63,19 @@ jobs:
           pattern: release-*
           merge-multiple: true
 
-      - name: Create GitHub Release
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GH_REPO: ${{ github.repository }}
+      - name: Determine Release Tag
         run: |
-          # Determine release tag: manual input > VERSION file > fallback
-          $tag = '${{ github.event.inputs.tag_name }}'
-          if (-not $tag -and (Test-Path release-assets\VERSION)) {
-              $tag = (Get-Content release-assets\VERSION -Raw).Trim()
-          }
-          if (-not $tag) { $tag = '${{ github.ref_name }}' }
-          if (-not $tag -or $tag -eq 'release' -or $tag -eq 'master') { $tag = "v1.0.0" }
+          $inputTag = '${{ github.event.inputs.tag_name }}'
+          $tag = if ($inputTag) { $inputTag } else { "v$((Get-Content VERSION).Trim().TrimStart('v'))" }
+          echo "RELEASE_TAG=$tag" >> $env:GITHUB_ENV
 
-          Write-Host "Publishing release for tag: $tag (Repository: ${{ github.repository }})"
-          $assets = Get-ChildItem -Path release-assets -File | Where-Object { $_.Name -ne 'VERSION' } | ForEach-Object { $_.FullName }
-
-          # Check if release already exists using LASTEXITCODE
-          $ErrorActionPreference = 'Continue'
-          & gh release view $tag --json id 2>$null | Out-Null
-          $releaseExists = ($LASTEXITCODE -eq 0)
-          $ErrorActionPreference = 'Stop'
-
-          $targetArgs = @()
-          if ('${{ github.ref_name }}' -and -not '${{ github.ref_name }}'.StartsWith('v')) {
-              $targetArgs = @('--target', '${{ github.ref_name }}')
-          }
-
-          if (-not $releaseExists) {
-              Write-Host "Creating new release $tag on ${{ github.ref_name }}..."
-              & gh release create $tag @targetArgs `
-                  --title "Tiny Windows Utilities $tag" `
-                  --generate-notes
-          } else {
-              Write-Host "Release $tag already exists."
-          }
-
-          Write-Host "Uploading $($assets.Count) assets to release $tag..."
-          foreach ($file in $assets) {
-              $fileName = [System.IO.Path]::GetFileName($file)
-              Write-Host "  -> Uploading $fileName"
-              & gh release upload $tag $file --clobber
-          }
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          target_commitish: ${{ github.ref_name }}
+          name: Tiny Windows Utilities ${{ env.RELEASE_TAG }}
+          files: |
+            release-assets/*.exe
+            release-assets/*.zip
+          generate_release_notes: true
