@@ -32,7 +32,7 @@ ip-send.exe [--context-menu register|unregister|true|false]
 
 ### Content & Automation
 - **`--theme light|dark|system`**: Selects theme mode. Default is `system` (follows Windows App Light/Dark mode). Can also be toggled dynamically at runtime with `Ctrl + D`.
-- **`--to <recipients>`**: Pre-selects comma-separated recipient PC/user names (e.g. `--to PC-01,LAPTOP-03`).
+- **`--to <recipients>`**: Pre-selects comma- or semicolon-separated recipient PC/user names (e.g. `--to PC-01,LAPTOP-03`). Applied after the live recipient list is queried, matches on display name or IP address, and unmatched names are appended as custom entries so `--send` can still target them.
 - **`--message <text>` / `--msg <text>` / `-m <text>`**: Pre-populates the message body.
 - **`--file <path>` / positional arguments**: Pre-populates selected files or text payloads.
 - **`--send`**: Bypasses composer GUI and immediately dispatches via backend `ipcmd.exe send` when required parameters are provided.
@@ -60,7 +60,16 @@ ip-send.exe [--context-menu register|unregister|true|false]
 
 - **`Ctrl + O`**: File Open dialog (`GetOpenFileNameW` with multi-select support).
 - **Drag & Drop**: Native `WM_DROPFILES` integration for dropping files directly onto composer window.
-- **Paste (`Ctrl + V`)**: Pastes copied files (`CF_HDROP`) or text snippets (`CF_UNICODETEXT`).
+- **Paste (`Ctrl + V`)**: Pastes copied files (`CF_HDROP`) or text snippets (`CF_UNICODETEXT`, with a `CF_TEXT` ANSI fallback).
+  - Files become attachments and the status bar confirms `Pasted N file(s). Press Enter to send.` Pasting the same file twice is a no-op, and paths that no longer exist are rejected rather than sent as a broken reference.
+  - Text is appended to the message body so it is actually transmitted on send (`Pasted 1.4 MB of text. Press Enter to send.`). Pasted text is never dropped, including on a second paste.
+  - **Large pastes (1-10 MB and beyond)**: the message body is heap-backed, so a multi-megabyte paste is retained in full rather than clipped to a fixed buffer. Bodies up to 128 MB are accepted.
+    - Bodies at or below `SEND_INLINE_MAX` (2048 chars) are passed to `ipcmd` as the inline `msg_body` argument.
+    - Anything larger is staged as a UTF-8 temp file and passed as `ipmsg`'s documented `/msgfile=<path>` argument, sidestepping the ~32 KB Windows command-line limit. The file is deleted immediately after `ipcmd` returns. (Verified: `ipcmd` rejects non-UTF-8 msgfiles with `msgfile can't open or not UTF-8`, so the staged file is always BOM-less UTF-8.)
+    - The composer shows the first 2048 characters plus a true total-size note (`... (5.0 MB of text)`) rather than laying out the whole body.
+    - Bodies over `MESSAGE_EDIT_MAX_CHARS` (65536) are send-only: pressing `Insert` or clicking the message area reports `Message is too large to edit here. It will be sent as-is.` instead of loading megabytes into the native multiline `EDIT` control, which would make the window unusable.
+  - `CF_HDROP` handles are read directly as `HDROP` values (locking one with `GlobalLock` yields `NULL` and silently discards the paste), and the clipboard is opened with a short retry so a transiently-held clipboard no longer makes paste a no-op.
+  - `Ctrl+V`, `Ctrl+O`, `Ctrl+D`, `Ctrl+0/+/-`, `r`, `/` and `Space` are consumed by their handlers and never leak their character into the recipient search field.
 
 ---
 
@@ -88,7 +97,15 @@ ip-send.exe [--context-menu register|unregister|true|false]
   3. Standard installation directories (`%ProgramFiles%\IPMsg`, `%ProgramFiles(x86)%\IPMsg`, and `%LocalAppData%\IPMsg`).
 - **Error Handling**: If IP Messenger is not detected on the system when attempting to send, a dialog and TUI status error are thrown:
   `For this utility to work, IP Messenger (ipcmd.exe / ipmsg.exe) needs to be installed on your system.`
-- **Backend Dispatch**: Calls `<detected_ipcmd_path> send /to:<recipients> [/msg:"<message>"] "<file1>" "<file2>" ...`.
+- **Backend Dispatch**: Calls the verified `ipcmd` grammar:
+  ```text
+  <detected_ipcmd_path> send [/file=path1 /file=path2...] "<uid|ipaddr|uid|ipaddr,...>" ("<msg_body>" | /msgfile=<path>)
+  ```
+  - `ipcmd` requires a body argument even for file-only sends, so an empty `""` is passed when there is no text.
+  - Large bodies use `/msgfile=<path>`; see §3 for the size thresholds and staging rules.
+  - Each argument is individually quoted and embedded quotes are escaped; the recipient and body arguments are separated by an explicit space so they never form adjacent quoted runs (`"a""b"`).
+  - The command line is built in a growable heap buffer capped at `32768` characters (the `CreateProcessW` limit) rather than a fixed stack buffer, so many or long attachment paths cannot overflow it.
+- **Send Validation**: sending is refused when nothing is attached (`Warning: Nothing to send. Attach a file or type a message.`), when an attachment has been deleted since it was attached (`Warning: An attached file no longer exists. Aborted send.`), or when no recipient is selected (`Warning: No recipients selected. Press Space to select.`). The composer only reports `Sent successfully!` when the dispatch process was actually created.
 - **IPC Contract**: `Global\TinyIPSendMutex` and `Global\TinyIPSendEvent`. Double-launch signals running instance and exits cleanly.
 
 ---

@@ -20,12 +20,22 @@
 
 #define MAX_PAYLOADS 64
 #define MAX_RECIPIENTS 128
+#define MAX_PAYLOAD_PATH 1024
+#define SEND_INLINE_MAX 2048
+#define SEND_WAIT_MS 4000
+#define MAX_SEND_CMDLINE 32768
+// Pasted message bodies live on the heap so multi-megabyte pastes are not clipped.
+#define MESSAGE_PREVIEW_CHARS 2048
+// Largest body we are willing to load into the native multiline EDIT control.
+// Beyond this the control becomes unusably slow to paint and scroll, so large
+// bodies stay send-only and are displayed as a size summary instead.
+#define MESSAGE_EDIT_MAX_CHARS 65536
+#define MAX_MESSAGE_CHARS (64u * 1024u * 1024u) // 64M chars = 128MB wchar ceiling
+#define MSGFILE_TMP_TEMPLATE L"tiny-ip-send-msg.tmp"
 
 typedef struct {
-    wchar_t path[MAX_PATH];
+    wchar_t path[MAX_PAYLOAD_PATH];
     wchar_t displayName[MAX_PATH];
-    bool isText;
-    wchar_t textPreview[128];
 } PayloadItem;
 
 typedef struct {
@@ -37,13 +47,25 @@ typedef struct {
     bool selected;
 } RecipientItem;
 
+// Growable wide-character string used for the message body and for building the
+// ipcmd command line. The body must be heap-allocated: pasted content can be
+// multiple megabytes, which no fixed inline array can hold.
+typedef struct {
+    wchar_t* data;
+    size_t len;
+    size_t cap;
+    size_t limit; // hard ceiling on len; 0 means MAX_SEND_CMDLINE
+    bool failed;
+} StrBuf;
+
 typedef struct {
     PayloadItem payloads[MAX_PAYLOADS];
     int payloadCount;
 
-    wchar_t messageText[1024];
-    int messageLen;
+    StrBuf message;          // authoritative message body (heap, unbounded-ish)
     bool messageMode; // True when editing message (i key)
+
+    wchar_t toArg[256];
 
     wchar_t searchQuery[64];
     int searchLen;
@@ -78,16 +100,76 @@ static HANDLE g_hEvent = NULL;
 static HFONT g_hFontNormal = NULL;
 static HFONT g_hFontBold = NULL;
 static HFONT g_hFontCaption = NULL;
-static bool g_skipNextCharForInsertMode = false;
-static bool g_skipNextCharForRefresh = false;
-static bool g_skipNextCharForSlash = false;
-static bool g_skipNextCharForSpace = false;
-static bool g_skipNextCharForNewline = false;
+// Set by any WM_KEYDOWN shortcut we handle ourselves so the synthesized WM_CHAR
+// (Ctrl+V -> 'v', Ctrl+O -> 'o', ...) never leaks into the recipient search box.
+static bool g_skipNextChar = false;
 static bool g_lightTheme = false;
 static bool g_themeManuallyToggled = false;
 static RECT g_sendRect = { 0 };
 static int g_listStartY = 0;
 static int g_itemHeight = 24;
+
+// ---------------------------------------------------------------------------
+// StrBuf: growable wide-string used for the message body and the send command.
+// ---------------------------------------------------------------------------
+static void StrBuf_InitLimit(StrBuf* sb, size_t limit) {
+    sb->data = NULL;
+    sb->len = 0;
+    sb->cap = 0;
+    sb->limit = limit;
+    sb->failed = false;
+}
+
+static void StrBuf_Init(StrBuf* sb) {
+    StrBuf_InitLimit(sb, MAX_SEND_CMDLINE);
+}
+
+static void StrBuf_Free(StrBuf* sb) {
+    if (sb->data) free(sb->data);
+    sb->data = NULL;
+    sb->len = 0;
+    sb->cap = 0;
+}
+
+static bool StrBuf_Reserve(StrBuf* sb, size_t extra) {
+    if (sb->failed) return false;
+    size_t limit = sb->limit ? sb->limit : MAX_SEND_CMDLINE;
+    if (extra > limit || sb->len > limit - extra) { sb->failed = true; return false; }
+
+    size_t need = sb->len + extra + 1;
+    if (need <= sb->cap) return true;
+
+    size_t newCap = sb->cap ? sb->cap : 256;
+    while (newCap < need) {
+        if (newCap > limit / 2) { newCap = need; break; }
+        newCap *= 2;
+    }
+    wchar_t* p = (wchar_t*)realloc(sb->data, newCap * sizeof(wchar_t));
+    if (!p) { sb->failed = true; return false; }
+    sb->data = p;
+    sb->cap = newCap;
+    return true;
+}
+
+static void StrBuf_AppendN(StrBuf* sb, const wchar_t* s, size_t n) {
+    if (!s || sb->failed) return;
+    if (!StrBuf_Reserve(sb, n)) return;
+    memcpy(sb->data + sb->len, s, n * sizeof(wchar_t));
+    sb->len += n;
+    sb->data[sb->len] = L'\0';
+}
+
+static void StrBuf_Append(StrBuf* sb, const wchar_t* s) {
+    if (!s || sb->failed) return;
+    StrBuf_AppendN(sb, s, wcslen(s));
+}
+
+static void StrBuf_AppendChar(StrBuf* sb, wchar_t c) {
+    if (sb->failed) return;
+    if (!StrBuf_Reserve(sb, 1)) return;
+    sb->data[sb->len++] = c;
+    sb->data[sb->len] = L'\0';
+}
 
 static void ShowStatusToast(HWND hWnd, const wchar_t* text) {
     if (!text) return;
@@ -125,27 +207,136 @@ static const wchar_t* GetFileNameFromPath(const wchar_t* path) {
     return p ? (p + 1) : path;
 }
 
-// Add a file payload item
-static void AddFilePayload(const wchar_t* path) {
-    if (g_state.payloadCount >= MAX_PAYLOADS) return;
+// Add a file payload item. Returns true when an entry was attached or was
+// already attached (duplicate); false when rejected (missing / too long / list full).
+static bool AddFilePayload(const wchar_t* path) {
+    if (!path || path[0] == L'\0') return false;
+    if (g_state.payloadCount >= MAX_PAYLOADS) return false;
+    if (wcslen(path) >= MAX_PAYLOAD_PATH) return false;
+    // Stale clipboard / shell entries can reference files that no longer exist.
+    if (GetFileAttributesW(path) == INVALID_FILE_ATTRIBUTES) return false;
+
     for (int i = 0; i < g_state.payloadCount; i++) {
-        if (_wcsicmp(g_state.payloads[i].path, path) == 0) return; // avoid duplicates
+        if (_wcsicmp(g_state.payloads[i].path, path) == 0) return true; // avoid duplicates
     }
     PayloadItem* item = &g_state.payloads[g_state.payloadCount++];
-    wcscpy_s(item->path, MAX_PATH, path);
+    wcscpy_s(item->path, MAX_PAYLOAD_PATH, path);
     wcscpy_s(item->displayName, MAX_PATH, GetFileNameFromPath(path));
-    item->isText = false;
-    item->textPreview[0] = L'\0';
+    return true;
 }
 
-// Add a text payload item
-static void AddTextPayload(const wchar_t* text) {
-    if (g_state.payloadCount >= MAX_PAYLOADS) return;
-    PayloadItem* item = &g_state.payloads[g_state.payloadCount++];
-    item->path[0] = L'\0';
-    item->displayName[0] = L'\0';
-    item->isText = true;
-    wcsncpy_s(item->textPreview, 128, text, _TRUNCATE);
+// Reads every file from an HDROP into the payload list.
+// NOTE: the CF_HDROP handle from GetClipboardData is already a valid HDROP and must
+// NOT be passed to GlobalLock - GlobalLock returns NULL for it, which silently
+// dropped every pasted file.
+static int CollectFilesFromDrop(HDROP hd) {
+    if (!hd) return 0;
+    int added = 0;
+    UINT count = DragQueryFileW(hd, 0xFFFFFFFF, NULL, 0);
+    for (UINT i = 0; i < count; i++) {
+        UINT need = DragQueryFileW(hd, i, NULL, 0); // required chars, excluding NUL
+        if (need == 0) continue;
+        wchar_t* buf = (wchar_t*)malloc(((size_t)need + 1) * sizeof(wchar_t));
+        if (!buf) continue;
+        if (DragQueryFileW(hd, i, buf, need + 1) > 0) {
+            if (AddFilePayload(buf)) added++;
+        }
+        free(buf);
+    }
+    return added;
+}
+
+// Appends text into the message body. Pasted text must land in the body, otherwise
+// it is only shown in the payload list and never actually dispatched by ipcmd.
+// Accepts multi-megabyte input; the body is heap-backed so nothing is clipped.
+static void AppendMessageText(const wchar_t* text) {
+    if (!text || text[0] == L'\0') return;
+
+    if (g_state.message.len > 0) {
+        StrBuf_AppendChar(&g_state.message, L'\r');
+        StrBuf_AppendChar(&g_state.message, L'\n');
+    }
+    StrBuf_Append(&g_state.message, text);
+}
+
+// Replaces the whole message body (used for CLI --message and edit-box sync).
+static void SetMessageText(const wchar_t* text) {
+    StrBuf_InitLimit(&g_state.message, MAX_MESSAGE_CHARS);
+    StrBuf_Append(&g_state.message, text ? text : L"");
+}
+
+// Copies the current body into the native edit box for in-place editing.
+static void SyncEditFromMessage(void) {
+    if (g_hEdit && IsWindow(g_hEdit)) {
+        SetWindowTextW(g_hEdit, g_state.message.data ? g_state.message.data : L"");
+    }
+}
+
+// Reads the edit box back into the authoritative body.
+static void SyncMessageFromEdit(void) {
+    if (!g_hEdit || !IsWindow(g_hEdit)) return;
+    int len = GetWindowTextLengthW(g_hEdit);
+    if (len <= 0) {
+        StrBuf_InitLimit(&g_state.message, MAX_MESSAGE_CHARS);
+        return;
+    }
+    wchar_t* buf = (wchar_t*)malloc(((size_t)len + 1) * sizeof(wchar_t));
+    if (!buf) return;
+    GetWindowTextW(g_hEdit, buf, len + 1);
+    SetMessageText(buf);
+    free(buf);
+}
+
+// True when the body is small enough to hand to ipcmd as an inline argument.
+static bool MessageFitsInline(void) {
+    return g_state.message.len > 0 && g_state.message.len <= SEND_INLINE_MAX && !g_state.message.failed;
+}
+
+// Writes the body to a temp file as UTF-8 (ipcmd rejects non-UTF-8 msgfiles).
+// Returns false if the file could not be created or written.
+static bool WriteMessageTempFile(wchar_t* outPath, size_t outCap) {
+    wchar_t tempDir[MAX_PATH];
+    DWORD n = GetTempPathW(MAX_PATH, tempDir);
+    if (n == 0 || n >= MAX_PATH) return false;
+    swprintf_s(outPath, outCap, L"%s%s", tempDir, MSGFILE_TMP_TEMPLATE);
+
+    // ipmsg requires UTF-8; the msgfile must not carry a BOM (it is read as-is).
+    int u8Bytes = WideCharToMultiByte(CP_UTF8, 0, g_state.message.data, (int)g_state.message.len, NULL, 0, NULL, NULL);
+    if (u8Bytes <= 0) return false;
+
+    char* u8 = (char*)malloc((size_t)u8Bytes);
+    if (!u8) return false;
+    if (WideCharToMultiByte(CP_UTF8, 0, g_state.message.data, (int)g_state.message.len, u8, u8Bytes, NULL, NULL) <= 0) {
+        free(u8);
+        return false;
+    }
+
+    HANDLE hf = CreateFileW(outPath, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_TEMPORARY, NULL);
+    if (hf == INVALID_HANDLE_VALUE) { free(u8); return false; }
+
+    DWORD written = 0;
+    bool ok = WriteFile(hf, u8, (DWORD)u8Bytes, &written, NULL) && written == (DWORD)u8Bytes;
+    CloseHandle(hf);
+    free(u8);
+
+    if (!ok) {
+        DeleteFileW(outPath);
+        outPath[0] = L'\0';
+        return false;
+    }
+    return true;
+}
+
+// Human-readable body size, e.g. "1.4 MB" / "812 KB" / "37 chars".
+static void FormatMessageSize(size_t chars, wchar_t* out, size_t cap) {
+    double bytes = (double)chars * sizeof(wchar_t);
+    if (bytes >= 1024.0 * 1024.0) {
+        swprintf_s(out, cap, L"%.1f MB", bytes / (1024.0 * 1024.0));
+    } else if (bytes >= 1024.0) {
+        swprintf_s(out, cap, L"%.0f KB", bytes / 1024.0);
+    } else {
+        swprintf_s(out, cap, L"%zu chars", chars);
+    }
 }
 
 // Filter recipients based on search query
@@ -444,6 +635,50 @@ static bool QueryLiveIPMsgRecipients(const wchar_t* ipcmdPath) {
     return false;
 }
 
+// Applies the --to comma/semicolon separated recipient list against the live
+// recipient list. Must run AFTER InitRecipients(), since InitRecipients resets
+// recipientCount. Unmatched names are added as custom offline-capable entries.
+static void ApplyRecipientSelection(void) {
+    if (g_state.toArg[0] == L'\0') return;
+
+    wchar_t toBuf[256];
+    wcscpy_s(toBuf, 256, g_state.toArg);
+    wchar_t* nextToken = NULL;
+    wchar_t* token = wcstok_s(toBuf, L",;", &nextToken);
+    while (token) {
+        // Trim surrounding whitespace of each token
+        while (*token == L' ' || *token == L'\t') token++;
+        size_t len = wcslen(token);
+        while (len > 0 && (token[len - 1] == L' ' || token[len - 1] == L'\t')) {
+            token[--len] = L'\0';
+        }
+
+        if (token[0] != L'\0') {
+            bool found = false;
+            for (int r = 0; r < g_state.recipientCount; r++) {
+                if (_wcsicmp(g_state.recipients[r].name, token) == 0 ||
+                    (g_state.recipients[r].ipAddr[0] != L'\0' &&
+                     wcscmp(g_state.recipients[r].ipAddr, L"-") != 0 &&
+                     _wcsicmp(g_state.recipients[r].ipAddr, token) == 0)) {
+                    g_state.recipients[r].selected = true;
+                    found = true;
+                    break;
+                }
+            }
+            if (!found && g_state.recipientCount < MAX_RECIPIENTS) {
+                RecipientItem* item = &g_state.recipients[g_state.recipientCount++];
+                wcscpy_s(item->name, 128, token);
+                wcscpy_s(item->hostName, 128, L"Custom");
+                item->active = true;
+                item->selected = true;
+            }
+        }
+        token = wcstok_s(NULL, L",;", &nextToken);
+    }
+
+    FilterRecipients();
+}
+
 // Check if IP Messenger process is currently running
 static bool IsIPMsgProcessRunning(void) {
     bool running = false;
@@ -454,7 +689,7 @@ static bool IsIPMsgProcessRunning(void) {
     pe.dwSize = sizeof(PROCESSENTRY32W);
     if (Process32FirstW(hSnap, &pe)) {
         do {
-            if (_wcsicmp(pe.szExeFile, L"ipmsg.exe") == 0 || _wcsicmp(pe.szExeFile, L"ipcmd.exe") == 0) {
+            if (_wcsicmp(pe.szExeFile, L"ipmsg.exe") == 0) {
                 running = true;
                 break;
             }
@@ -590,33 +825,13 @@ static bool ParseCommandLine(const wchar_t* cmdLine, AppState* state) {
     }
 
     if (msgArg) {
-        wcscpy_s(state->messageText, 1024, msgArg);
-        state->messageLen = (int)wcslen(state->messageText);
+        SetMessageText(msgArg);
     }
 
+    // NOTE: --to is applied later (ApplyRecipientSelection) once InitRecipients()
+    // has populated the live list, otherwise InitRecipients would wipe it.
     if (toArg) {
-        wchar_t toBuf[256];
-        wcscpy_s(toBuf, 256, toArg);
-        wchar_t* nextToken = NULL;
-        wchar_t* token = wcstok_s(toBuf, L",; ", &nextToken);
-        while (token) {
-            bool found = false;
-            for (int r = 0; r < state->recipientCount; r++) {
-                if (_wcsicmp(state->recipients[r].name, token) == 0) {
-                    state->recipients[r].selected = true;
-                    found = true;
-                    break;
-                }
-            }
-            if (!found && state->recipientCount < MAX_RECIPIENTS) {
-                wcscpy_s(state->recipients[state->recipientCount].name, 128, token);
-                wcscpy_s(state->recipients[state->recipientCount].hostName, 128, L"Custom");
-                state->recipients[state->recipientCount].active = true;
-                state->recipients[state->recipientCount].selected = true;
-                state->recipientCount++;
-            }
-            token = wcstok_s(NULL, L",; ", &nextToken);
-        }
+        wcscpy_s(state->toArg, 256, toArg);
     }
 
     for (int i = 1; i < argc; i++) {
@@ -827,6 +1042,114 @@ static bool FindIPMsgExecutable(wchar_t* outPath, DWORD maxLen) {
 // Forward declaration
 static LRESULT CALLBACK EditSubclassProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
+// Appends s as a properly quoted command-line argument (escapes embedded quotes).
+static void StrBuf_AppendQuoted(StrBuf* sb, const wchar_t* s) {
+    if (!s || sb->failed) return;
+    StrBuf_AppendChar(sb, L'"');
+    for (const wchar_t* p = s; *p; p++) {
+        if (*p == L'"') StrBuf_AppendChar(sb, L'\\');
+        if (*p == L'\r' || *p == L'\n') continue; // never embed raw newlines in an argument
+        StrBuf_AppendChar(sb, *p);
+    }
+    StrBuf_AppendChar(sb, L'"');
+}
+
+// Builds the ipcmd send command per its verified usage grammar:
+//   send [/file=path1 /file=path2...] [/noseal]
+//        "((uid|ipaddr|ALL)[,uid...] | /userfile=path)"
+//        ("msg_body" | /msgfile=path)
+// Bodies that do not fit the ~32KB CreateProcessW command-line limit are handed
+// over as /msgfile=<tempfile> instead, which ipcmd reads as UTF-8.
+// On success *msgFileOut holds the temp path to delete after the send (or empty).
+static bool BuildSendCommand(StrBuf* sb, const wchar_t* ipcmdPath, wchar_t* msgFileOut, size_t msgFileCap) {
+    StrBuf_Init(sb);
+    msgFileOut[0] = L'\0';
+
+    if (g_state.payloadCount == 0 && g_state.message.len == 0) {
+        ShowStatusToast(g_hWnd, L"Warning: Nothing to send. Attach a file or type a message.");
+        return false;
+    }
+    if (g_state.message.failed) {
+        ShowStatusToast(g_hWnd, L"Error: Message is too large to send.");
+        return false;
+    }
+
+    StrBuf_AppendChar(sb, L'"');
+    StrBuf_Append(sb, ipcmdPath);
+    StrBuf_Append(sb, L"\" send");
+
+    int attached = 0;
+    for (int i = 0; i < g_state.payloadCount; i++) {
+        const wchar_t* path = g_state.payloads[i].path;
+        if (!path || path[0] == L'\0') continue;
+        if (GetFileAttributesW(path) == INVALID_FILE_ATTRIBUTES) {
+            ShowStatusToast(g_hWnd, L"Warning: An attached file no longer exists. Aborted send.");
+            StrBuf_Free(sb);
+            return false;
+        }
+        StrBuf_Append(sb, L" /file=");
+        StrBuf_AppendQuoted(sb, path);
+        attached++;
+    }
+
+    // Recipients
+    StrBuf targets;
+    StrBuf_Init(&targets);
+    int selected = 0;
+    for (int i = 0; i < g_state.recipientCount; i++) {
+        if (!g_state.recipients[i].selected) continue;
+        const wchar_t* target =
+            (g_state.recipients[i].ipAddr[0] != L'\0' && wcscmp(g_state.recipients[i].ipAddr, L"-") != 0)
+                ? g_state.recipients[i].ipAddr
+                : g_state.recipients[i].name;
+        if (selected > 0) StrBuf_AppendChar(&targets, L',');
+        StrBuf_Append(&targets, target);
+        selected++;
+    }
+
+    if (selected == 0) {
+        StrBuf_Free(&targets);
+        ShowStatusToast(g_hWnd, L"Warning: No recipients selected. Press Space to select.");
+        StrBuf_Free(sb);
+        return false;
+    }
+
+    StrBuf_Append(sb, L" \"");
+    StrBuf_Append(sb, targets.data);
+    StrBuf_AppendChar(sb, L'"');
+    StrBuf_Free(&targets);
+
+    // Explicit separator: without it the recipient and body quotes would form
+    // adjacent quoted runs ("a""b"), which CommandLineToArgv only splits by luck.
+    StrBuf_AppendChar(sb, L' ');
+
+    // ipcmd requires a message argument. Small bodies go inline; anything past
+    // the command-line budget is staged in a UTF-8 temp file and passed as
+    // /msgfile=, so multi-megabyte pastes are transmitted in full.
+    if (g_state.message.len == 0) {
+        StrBuf_AppendQuoted(sb, L"");
+    } else if (MessageFitsInline()) {
+        StrBuf_AppendQuoted(sb, g_state.message.data);
+    } else {
+        if (!WriteMessageTempFile(msgFileOut, msgFileCap)) {
+            StrBuf_Free(sb);
+            ShowStatusToast(g_hWnd, L"Error: Could not stage large message to a temp file.");
+            return false;
+        }
+        StrBuf_Append(sb, L"/msgfile=");
+        StrBuf_AppendQuoted(sb, msgFileOut);
+    }
+
+    if (sb->failed || !sb->data) {
+        StrBuf_Free(sb);
+        if (msgFileOut[0]) { DeleteFileW(msgFileOut); msgFileOut[0] = L'\0'; }
+        ShowStatusToast(g_hWnd, L"Error: Could not build send command (too many attachments?).");
+        return false;
+    }
+    (void)attached;
+    return true;
+}
+
 // Backend Send Execution
 static bool ExecuteSend(HWND hWnd) {
     // Check if IP Messenger is installed on system
@@ -843,57 +1166,18 @@ static bool ExecuteSend(HWND hWnd) {
         return false;
     }
 
-    if (g_hEdit && IsWindow(g_hEdit)) {
-        GetWindowTextW(g_hEdit, g_state.messageText, 1024);
-        g_state.messageLen = (int)wcslen(g_state.messageText);
+    if (g_hEdit && IsWindow(g_hEdit) && g_state.messageMode) {
+        SyncMessageFromEdit();
     }
 
     EnsureIPMsgProcessRunning(ipcmdPath);
 
-    // Build recipient list
-    wchar_t toList[512] = { 0 };
-    int selectedCount = 0;
-    for (int i = 0; i < g_state.recipientCount; i++) {
-        if (g_state.recipients[i].selected) {
-            const wchar_t* target = (g_state.recipients[i].ipAddr[0] != L'\0' && wcscmp(g_state.recipients[i].ipAddr, L"-") != 0)
-                ? g_state.recipients[i].ipAddr
-                : g_state.recipients[i].name;
-            if (selectedCount > 0) wcscat_s(toList, 512, L",");
-            wcscat_s(toList, 512, target);
-            selectedCount++;
-        }
-    }
-
-    if (selectedCount == 0) {
-        ShowStatusToast(hWnd, L"Warning: No recipients selected. Press Space to select.");
+    wchar_t msgFile[MAX_PATH] = { 0 };
+    StrBuf cmdLine;
+    if (!BuildSendCommand(&cmdLine, ipcmdPath, msgFile, MAX_PATH)) {
+        g_state.statusTime = GetTickCount();
+        if (hWnd) InvalidateRect(hWnd, NULL, FALSE);
         return false;
-    }
-
-    // Build command line for ipcmd send
-    // ipcmd send [/file=path1 ...] "uid1,uid2" "msg_body"
-    wchar_t cmdLine[4096] = { 0 };
-    wcscpy_s(cmdLine, 4096, L"\"");
-    wcscat_s(cmdLine, 4096, ipcmdPath);
-    wcscat_s(cmdLine, 4096, L"\" send");
-
-    for (int i = 0; i < g_state.payloadCount; i++) {
-        if (!g_state.payloads[i].isText && g_state.payloads[i].path[0] != L'\0') {
-            wchar_t filePart[MAX_PATH + 16];
-            wsprintfW(filePart, L" /file=\"%s\"", g_state.payloads[i].path);
-            lstrcatW(cmdLine, filePart);
-        }
-    }
-
-    wchar_t toPart[540];
-    wsprintfW(toPart, L" \"%s\"", toList);
-    lstrcatW(cmdLine, toPart);
-
-    if (g_state.messageLen > 0) {
-        wchar_t msgPart[1100];
-        swprintf_s(msgPart, 1100, L" \"%s\"", g_state.messageText);
-        lstrcatW(cmdLine, msgPart);
-    } else {
-        lstrcatW(cmdLine, L" \"\"");
     }
 
     STARTUPINFOW si = { sizeof(si) };
@@ -901,24 +1185,39 @@ static bool ExecuteSend(HWND hWnd) {
     si.dwFlags = STARTF_USESHOWWINDOW;
     si.wShowWindow = SW_HIDE;
 
-    BOOL ok = CreateProcessW(NULL, cmdLine, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi);
+    // CreateProcessW may modify the command line, so pass a writable buffer.
+    BOOL ok = CreateProcessW(NULL, cmdLine.data, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi);
+
     if (ok) {
+        // ipcmd exits immediately after handing the payload to the ipmsg daemon.
+        WaitForSingleObject(pi.hProcess, SEND_WAIT_MS);
         CloseHandle(pi.hThread);
         CloseHandle(pi.hProcess);
-        wcscpy_s(g_state.statusText, 256, L"Sent successfully!");
+
+        wchar_t sizeBuf[32];
+        FormatMessageSize(g_state.message.len, sizeBuf, 32);
+        wchar_t status[256];
+        if (g_state.message.len > 0) {
+            swprintf_s(status, 256, L"Sent successfully! (%s body)", sizeBuf);
+        } else {
+            wcscpy_s(status, 256, L"Sent successfully!");
+        }
+        ShowStatusToast(hWnd, status);
     } else {
-        wcscpy_s(g_state.statusText, 256, L"Error executing IP Messenger command.");
+        ShowStatusToast(hWnd, L"Error executing IP Messenger command.");
     }
 
-    g_state.statusTime = GetTickCount();
-    g_state.sending = true;
+    StrBuf_Free(&cmdLine);
+    // ipcmd has read the staged body by the time it exits, so the temp file can go.
+    if (msgFile[0]) DeleteFileW(msgFile);
+    g_state.sending = ok;
 
     if (hWnd) {
         InvalidateRect(hWnd, NULL, FALSE);
-        SetTimer(hWnd, 100, 400, NULL); // Short delay before exit
+        if (ok) SetTimer(hWnd, 100, 400, NULL); // Short delay before exit
     }
 
-    return true;
+    return ok;
 }
 
 // File Open Dialog (Ctrl+O)
@@ -956,8 +1255,7 @@ static LRESULT CALLBACK EditSubclassProc(HWND hWnd, UINT msg, WPARAM wParam, LPA
     switch (msg) {
     case WM_KEYDOWN:
         if (wParam == VK_ESCAPE || wParam == VK_INSERT) {
-            GetWindowTextW(hWnd, g_state.messageText, 1024);
-            g_state.messageLen = (int)wcslen(g_state.messageText);
+            SyncMessageFromEdit();
             g_state.messageMode = false;
             ShowWindow(hWnd, SW_HIDE);
             SetFocus(g_hWnd);
@@ -1006,8 +1304,7 @@ static LRESULT CALLBACK EditSubclassProc(HWND hWnd, UINT msg, WPARAM wParam, LPA
             return 0;
         }
         if (wParam == VK_RETURN && (GetKeyState(VK_CONTROL) & 0x8000)) {
-            GetWindowTextW(hWnd, g_state.messageText, 1024);
-            g_state.messageLen = (int)wcslen(g_state.messageText);
+            SyncMessageFromEdit();
             ExecuteSend(g_hWnd);
             return 0;
         }
@@ -1020,52 +1317,107 @@ static LRESULT CALLBACK EditSubclassProc(HWND hWnd, UINT msg, WPARAM wParam, LPA
         break;
 
     case WM_KILLFOCUS:
-        GetWindowTextW(hWnd, g_state.messageText, 1024);
-        g_state.messageLen = (int)wcslen(g_state.messageText);
+        SyncMessageFromEdit();
         break;
     }
     return CallWindowProcW(g_oldEditProc, hWnd, msg, wParam, lParam);
 }
 
 // Handle Paste (Ctrl+V)
+// Files (CF_HDROP) become attachments; plain text becomes the message body.
 static void HandlePaste(HWND hWnd) {
     if (g_state.messageMode && g_hEdit && IsWindow(g_hEdit)) {
         SendMessageW(g_hEdit, WM_PASTE, 0, 0);
-        GetWindowTextW(g_hEdit, g_state.messageText, 1024);
-        g_state.messageLen = (int)wcslen(g_state.messageText);
+        SyncMessageFromEdit();
         InvalidateRect(hWnd, NULL, FALSE);
         return;
     }
 
-    // Check for dropped files or text on clipboard
-    if (OpenClipboard(hWnd)) {
-        if (IsClipboardFormatAvailable(CF_HDROP)) {
-            HANDLE hDrop = GetClipboardData(CF_HDROP);
-            if (hDrop) {
-                HDROP hd = (HDROP)GlobalLock(hDrop);
-                if (hd) {
-                    UINT count = DragQueryFileW(hd, 0xFFFFFFFF, NULL, 0);
-                    for (UINT i = 0; i < count; i++) {
-                        wchar_t path[MAX_PATH];
-                        DragQueryFileW(hd, i, path, MAX_PATH);
-                        AddFilePayload(path);
-                    }
-                    GlobalUnlock(hDrop);
-                }
-            }
-        } else if (IsClipboardFormatAvailable(CF_UNICODETEXT)) {
-            HANDLE hData = GetClipboardData(CF_UNICODETEXT);
-            if (hData) {
-                wchar_t* clipText = (wchar_t*)GlobalLock(hData);
-                if (clipText) {
-                    AddTextPayload(clipText);
-                    GlobalUnlock(hData);
-                }
-            }
-        }
-        CloseClipboard();
-        InvalidateRect(hWnd, NULL, FALSE);
+    bool gotFile = false;
+    bool gotText = false;
+    int addedFiles = 0;
+    size_t pastedChars = 0;
+
+    // The clipboard is a shared resource and may be briefly held by another app.
+    if (!TinyClipboard_OpenWithRetry(hWnd, 5, 10)) {
+        ShowStatusToast(hWnd, L"Warning: Clipboard is busy. Try pasting again.");
+        return;
     }
+
+    // Prefer files over text when the clipboard carries both (Explorer file copy).
+    if (IsClipboardFormatAvailable(CF_HDROP)) {
+        HDROP hDrop = (HDROP)GetClipboardData(CF_HDROP);
+        addedFiles = CollectFilesFromDrop(hDrop);
+        gotFile = (addedFiles > 0);
+    } else if (IsClipboardFormatAvailable(CF_UNICODETEXT)) {
+        HANDLE hData = GetClipboardData(CF_UNICODETEXT);
+        if (hData) {
+            const wchar_t* clipText = (const wchar_t*)GlobalLock(hData);
+            if (clipText && clipText[0] != L'\0') {
+                // Pastes can be many megabytes; AppendMessageText grows the heap
+                // buffer rather than clipping into a fixed array.
+                pastedChars = wcslen(clipText);
+                AppendMessageText(clipText);
+                gotText = !g_state.message.failed;
+                if (!gotText) {
+                    CloseClipboard();
+                    StrBuf_Free(&g_state.message);
+                    StrBuf_InitLimit(&g_state.message, MAX_MESSAGE_CHARS);
+                    ShowStatusToast(hWnd, L"Error: Pasted text is too large (max 128 MB).");
+                    return;
+                }
+            }
+            if (clipText) GlobalUnlock(hData);
+        }
+    } else if (IsClipboardFormatAvailable(CF_TEXT)) {
+        HANDLE hData = GetClipboardData(CF_TEXT);
+        if (hData) {
+            const char* ansiText = (const char*)GlobalLock(hData);
+            if (ansiText && ansiText[0] != '\0') {
+                int wlen = MultiByteToWideChar(CP_ACP, 0, ansiText, -1, NULL, 0);
+                if (wlen > 1) {
+                    wchar_t* wbuf = (wchar_t*)malloc((size_t)wlen * sizeof(wchar_t));
+                    if (wbuf) {
+                        MultiByteToWideChar(CP_ACP, 0, ansiText, -1, wbuf, wlen);
+                        pastedChars = (size_t)(wlen - 1);
+                        AppendMessageText(wbuf);
+                        free(wbuf);
+                        gotText = !g_state.message.failed;
+                    }
+                }
+            }
+            if (ansiText) GlobalUnlock(hData);
+        }
+    }
+
+    CloseClipboard();
+
+    if (gotFile) {
+        wchar_t status[128];
+        swprintf_s(status, 128, L"Pasted %d file(s). Press Enter to send.", addedFiles);
+        ShowStatusToast(hWnd, status);
+    } else if (gotText) {
+        // Report the real size so multi-megabyte pastes are visibly accepted.
+        wchar_t sizeBuf[32], status[160];
+        FormatMessageSize(g_state.message.len, sizeBuf, 32);
+        if (g_state.message.len <= MESSAGE_EDIT_MAX_CHARS) {
+            swprintf_s(status, 160, L"Pasted %s of text. Press Enter to send.", sizeBuf);
+        } else {
+            swprintf_s(status, 160, L"Pasted %s of text. Press Enter to send as message.", sizeBuf);
+        }
+        (void)pastedChars;
+        ShowStatusToast(hWnd, status);
+    } else {
+        ShowStatusToast(hWnd, L"Warning: Nothing usable on the clipboard.");
+    }
+
+    // Keep the edit box in step, but only when the body is small enough for the
+    // native control to stay responsive.
+    if (g_state.message.len <= MESSAGE_EDIT_MAX_CHARS) {
+        SyncEditFromMessage();
+    }
+
+    InvalidateRect(hWnd, NULL, FALSE);
 }
 
 
@@ -1188,12 +1540,12 @@ static void RenderTUIWindow(HWND hWnd, HDC hdc) {
             PayloadItem* item = &g_state.payloads[i];
             SetTextColor(memDC, textBright);
             wchar_t nameBuf[MAX_PATH + 4];
-            wsprintfW(nameBuf, L"@ %s", item->isText ? L"text snippet" : item->displayName);
+            swprintf_s(nameBuf, MAX_PATH + 4, L"@ %s", item->displayName);
             TextOutW(memDC, marginX, y, nameBuf, (int)lstrlenW(nameBuf));
             y += 18;
 
             SetTextColor(memDC, textDim);
-            const wchar_t* detail = item->isText ? item->textPreview : item->path;
+            const wchar_t* detail = item->path;
             TextOutW(memDC, marginX + cw * 2, y, detail, (int)lstrlenW(detail));
             y += 20;
         }
@@ -1210,10 +1562,25 @@ static void RenderTUIWindow(HWND hWnd, HDC hdc) {
     int maxTextWidth = width - (marginX * 2);
     if (maxTextWidth < 200) maxTextWidth = 200;
 
+    // Only ever lay out a bounded preview. Passing a multi-megabyte body to
+    // DrawTextW (even with DT_CALCRECT) would stall the UI thread.
+    wchar_t preview[MESSAGE_PREVIEW_CHARS + 1];
+    bool truncated = false;
+    size_t previewLen = 0;
+    if (g_state.message.len > 0) {
+        previewLen = g_state.message.len;
+        if (previewLen > MESSAGE_PREVIEW_CHARS) {
+            previewLen = MESSAGE_PREVIEW_CHARS;
+            truncated = true;
+        }
+        memcpy(preview, g_state.message.data, previewLen * sizeof(wchar_t));
+        preview[previewLen] = L'\0';
+    }
+
     int editH = 28;
-    if (g_state.messageLen > 0 || g_state.messageMode) {
+    if (g_state.message.len > 0 || g_state.messageMode) {
         RECT calcRect = { 0, 0, maxTextWidth - 8, 10000 };
-        const wchar_t* measureStr = (g_state.messageLen > 0) ? g_state.messageText : L"A";
+        const wchar_t* measureStr = (g_state.message.len > 0) ? preview : L"A";
         DrawTextW(memDC, measureStr, -1, &calcRect, DT_LEFT | DT_TOP | DT_WORDBREAK | DT_EDITCONTROL | DT_NOPREFIX | DT_CALCRECT);
         int textH = calcRect.bottom - calcRect.top;
         if (textH < 20) textH = 20;
@@ -1245,11 +1612,21 @@ static void RenderTUIWindow(HWND hWnd, HDC hdc) {
         if (g_hEdit && IsWindowVisible(g_hEdit)) {
             ShowWindow(g_hEdit, SW_HIDE);
         }
-        if (g_state.messageLen > 0) {
+        if (g_state.message.len > 0) {
             SetTextColor(memDC, textBright);
             RECT drawRect = { marginX, y + 2, marginX + maxTextWidth, y + editH };
-            DrawTextW(memDC, g_state.messageText, -1, &drawRect, DT_LEFT | DT_TOP | DT_WORDBREAK | DT_EDITCONTROL | DT_NOPREFIX);
+            DrawTextW(memDC, preview, -1, &drawRect, DT_LEFT | DT_TOP | DT_WORDBREAK | DT_EDITCONTROL | DT_NOPREFIX);
             y += editH + 8;
+
+            // Show the true total size when the visible text is only a preview.
+            if (truncated) {
+                wchar_t sizeBuf[32], noteBuf[96];
+                FormatMessageSize(g_state.message.len, sizeBuf, 32);
+                swprintf_s(noteBuf, 96, L"... (%s of text)", sizeBuf);
+                SetTextColor(memDC, textDim);
+                TextOutW(memDC, marginX, y, noteBuf, (int)lstrlenW(noteBuf));
+                y += 20;
+            }
         } else {
             SetTextColor(memDC, textDim);
             TextOutW(memDC, marginX, y, L"No message. Press Insert to edit", 32);
@@ -1474,9 +1851,11 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
 
     case WM_COMMAND: {
         if (LOWORD(wParam) == 1001 && HIWORD(wParam) == EN_CHANGE) {
-            if (g_hEdit && IsWindow(g_hEdit)) {
-                GetWindowTextW(g_hEdit, g_state.messageText, 1024);
-                g_state.messageLen = (int)wcslen(g_state.messageText);
+            // EN_CHANGE also fires while we programmatically push text into the
+            // box; only mirror it back when the body is editable in place.
+            if (g_hEdit && IsWindow(g_hEdit) && g_state.messageMode &&
+                g_state.message.len <= MESSAGE_EDIT_MAX_CHARS) {
+                SyncMessageFromEdit();
                 InvalidateRect(hWnd, NULL, FALSE);
             }
             return 0;
@@ -1580,9 +1959,15 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
         }
 
         if (PtInRect(&g_msgEditRect, pt)) {
+            // Very large bodies stay send-only: loading megabytes into a native
+            // multiline EDIT makes the window unusable to scroll and paint.
+            if (g_state.message.len > MESSAGE_EDIT_MAX_CHARS) {
+                ShowStatusToast(hWnd, L"Message is too large to edit here. It will be sent as-is.");
+                return 0;
+            }
             g_state.messageMode = true;
             if (g_hEdit) {
-                SetWindowTextW(g_hEdit, g_state.messageText);
+                SyncEditFromMessage();
                 SetWindowPos(g_hEdit, NULL, g_msgEditRect.left, g_msgEditRect.top,
                              g_msgEditRect.right - g_msgEditRect.left,
                              g_msgEditRect.bottom - g_msgEditRect.top,
@@ -1595,8 +1980,7 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
 
         if (g_state.messageMode && !PtInRect(&g_msgEditRect, pt)) {
             if (g_hEdit) {
-                GetWindowTextW(g_hEdit, g_state.messageText, 1024);
-                g_state.messageLen = (int)wcslen(g_state.messageText);
+                SyncMessageFromEdit();
                 ShowWindow(g_hEdit, SW_HIDE);
             }
             g_state.messageMode = false;
@@ -1634,8 +2018,9 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
         if (pcds && pcds->lpData && pcds->cbData >= sizeof(wchar_t)) {
             const wchar_t* incomingCmd = (const wchar_t*)pcds->lpData;
             ParseCommandLine(incomingCmd, &g_state);
-            if (g_hEdit && IsWindow(g_hEdit)) {
-                SetWindowTextW(g_hEdit, g_state.messageText);
+            ApplyRecipientSelection();
+            if (g_hEdit && IsWindow(g_hEdit) && g_state.message.len <= MESSAGE_EDIT_MAX_CHARS) {
+                SyncEditFromMessage();
             }
             SetForegroundWindow(hWnd);
             InvalidateRect(hWnd, NULL, FALSE);
@@ -1646,13 +2031,13 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
 
     case WM_DROPFILES: {
         HDROP hDrop = (HDROP)wParam;
-        UINT count = DragQueryFileW(hDrop, 0xFFFFFFFF, NULL, 0);
-        for (UINT i = 0; i < count; i++) {
-            wchar_t path[MAX_PATH];
-            DragQueryFileW(hDrop, i, path, MAX_PATH);
-            AddFilePayload(path);
-        }
+        int added = CollectFilesFromDrop(hDrop);
         DragFinish(hDrop);
+        if (added > 0) {
+            wchar_t status[128];
+            swprintf_s(status, 128, L"Attached %d file(s).", added);
+            ShowStatusToast(hWnd, status);
+        }
         InvalidateRect(hWnd, NULL, FALSE);
         return 0;
     }
@@ -1661,17 +2046,20 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
         if (TinyFont_HandleZoomKey(wParam, &g_fontSize)) {
             RecreateIPSendFonts(hWnd);
             InvalidateRect(hWnd, NULL, FALSE);
+            g_skipNextChar = true; // drop the synthesized WM_CHAR (e.g. '=')
             return 0;
         }
         bool ctrlDown = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
 
         if (ctrlDown && (wParam == 'O' || wParam == 'o')) {
             OpenFileDialog(hWnd);
+            g_skipNextChar = true; // drop the synthesized 'o' WM_CHAR
             return 0;
         }
 
         if (ctrlDown && (wParam == 'V' || wParam == 'v')) {
             HandlePaste(hWnd);
+            g_skipNextChar = true; // drop the synthesized 'v' WM_CHAR
             return 0;
         }
 
@@ -1682,14 +2070,14 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
                 InvalidateRect(g_hEdit, NULL, TRUE);
             }
             InvalidateRect(hWnd, NULL, FALSE);
+            g_skipNextChar = true; // drop the synthesized 'd' WM_CHAR
             return 0;
         }
 
         if (wParam == VK_ESCAPE) {
             if (g_state.messageMode) {
                 if (g_hEdit) {
-                    GetWindowTextW(g_hEdit, g_state.messageText, 1024);
-                    g_state.messageLen = (int)wcslen(g_state.messageText);
+                    SyncMessageFromEdit();
                     ShowWindow(g_hEdit, SW_HIDE);
                 }
                 g_state.messageMode = false;
@@ -1702,22 +2090,27 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
         }
 
         if (wParam == VK_INSERT) {
+            if (!g_state.messageMode && g_state.message.len > MESSAGE_EDIT_MAX_CHARS) {
+                // Send-only for huge bodies; opening the native EDIT would freeze.
+                ShowStatusToast(hWnd, L"Message is too large to edit here. It will be sent as-is.");
+                g_skipNextChar = true;
+                return 0;
+            }
             g_state.messageMode = !g_state.messageMode;
             if (g_state.messageMode) {
                 if (g_hEdit) {
-                    SetWindowTextW(g_hEdit, g_state.messageText);
+                    SyncEditFromMessage();
                     SetWindowPos(g_hEdit, NULL, g_msgEditRect.left, g_msgEditRect.top,
                                  g_msgEditRect.right - g_msgEditRect.left,
                                  g_msgEditRect.bottom - g_msgEditRect.top,
                                  SWP_NOZORDER | SWP_SHOWWINDOW);
                     SetFocus(g_hEdit);
-                    int len = (int)wcslen(g_state.messageText);
+                    int len = (int)g_state.message.len;
                     SendMessageW(g_hEdit, EM_SETSEL, (WPARAM)len, (LPARAM)len);
                 }
             } else {
                 if (g_hEdit) {
-                    GetWindowTextW(g_hEdit, g_state.messageText, 1024);
-                    g_state.messageLen = (int)wcslen(g_state.messageText);
+                    SyncMessageFromEdit();
                     ShowWindow(g_hEdit, SW_HIDE);
                 }
                 SetFocus(hWnd);
@@ -1728,7 +2121,7 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
 
         if (!g_state.messageMode && (wParam == 'R' || wParam == 'r') && !ctrlDown && g_state.searchLen == 0) {
             RefreshRecipientList(hWnd);
-            g_skipNextCharForRefresh = true;
+            g_skipNextChar = true; // 'r' is a command here, not a search character
             return 0;
         }
 
@@ -1746,7 +2139,7 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
                 L"Esc      Close / Exit message mode",
                 L"IP - Keyboard Shortcuts",
                 MB_OK);
-            g_skipNextCharForSlash = true;
+            g_skipNextChar = true; // '/' is a command here, not a search character
             InvalidateRect(hWnd, NULL, FALSE);
             return 0;
         }
@@ -1790,7 +2183,7 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
                         swprintf_s(warnBuf, 256, L"Warning: '%s' is offline.", g_state.recipients[rIdx].name);
                         ShowStatusToast(hWnd, warnBuf);
                     }
-                    g_skipNextCharForSpace = true;
+                    g_skipNextChar = true; // Space toggles, never searches
                 }
                 return 0;
             }
@@ -1809,28 +2202,10 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
     }
 
     case WM_CHAR: {
-        if (g_skipNextCharForNewline) {
-            g_skipNextCharForNewline = false;
-            return 0;
-        }
-
-        if (g_skipNextCharForSpace) {
-            g_skipNextCharForSpace = false;
-            return 0;
-        }
-
-        if (g_skipNextCharForInsertMode) {
-            g_skipNextCharForInsertMode = false;
-            return 0;
-        }
-
-        if (g_skipNextCharForRefresh) {
-            g_skipNextCharForRefresh = false;
-            return 0;
-        }
-
-        if (g_skipNextCharForSlash) {
-            g_skipNextCharForSlash = false;
+        // Swallow the character that Windows synthesizes for a shortcut we already
+        // handled in WM_KEYDOWN, so it never lands in the recipient search query.
+        if (g_skipNextChar) {
+            g_skipNextChar = false;
             return 0;
         }
 
@@ -1879,6 +2254,7 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
         if (g_hFontBold) DeleteObject(g_hFontBold);
         if (g_hFontCaption) DeleteObject(g_hFontCaption);
         if (g_hEditBrush) DeleteObject(g_hEditBrush);
+        StrBuf_Free(&g_state.message); // may hold a multi-megabyte pasted body
         PostQuitMessage(0);
         return 0;
     }
@@ -1888,6 +2264,10 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
 
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow) {
     (void)hInstance; (void)hPrevInstance; (void)lpCmdLine; (void)nCmdShow;
+
+    // Message body is heap-backed with its own (much larger) ceiling than the
+    // send command buffer.
+    StrBuf_InitLimit(&g_state.message, MAX_MESSAGE_CHARS);
 
     if (!ParseCommandLine(GetCommandLineW(), &g_state)) {
         return 0;
@@ -1942,8 +2322,11 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     g_hEvent = CreateEventW(NULL, FALSE, FALSE, EVENT_NAME);
 
     // Initialize default state & recipients
+    // Order matters: ParseCommandLine() (above) only records --to, InitRecipients()
+    // rebuilds the live list, then ApplyRecipientSelection() applies --to against it.
     g_state.visibleRows = 4;
     InitRecipients();
+    ApplyRecipientSelection();
 
     // Auto-send CLI execution
     if (g_state.autoSend) {

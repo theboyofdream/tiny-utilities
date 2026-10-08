@@ -2175,3 +2175,106 @@ Following the publication of release `v1.0.0`, inspection of the downloadable as
 - Audited `clang-cl /MD` output sizes across all 10 tools.
 - Validated YAML syntax in `.github/workflows/release.yml`.
 
+
+---
+
+## Cycle: `ip-send` — Paste Never Reached the Wire
+
+### Reported Symptom
+Pasting anything into the composer (files or text) appeared to do nothing: nothing was attached and nothing was transmitted on `Enter`.
+
+### Investigation
+Confirmed the installed IP Messenger is the modern `ipcmd.exe` (v4.x, H.Shirouzu build) and extracted its embedded usage block to establish the real grammar rather than assuming one:
+
+```text
+send [/file=path1 /file=path2...] [/noseal]
+     "((uid|ipaddr|ALL)[,uid...] | /userfile=path)"
+     ("msg_body" | /msgfile=path)
+                       ... Send message
+```
+
+This matched the existing invocation shape, so the defect was on the producer side, not the grammar side. Confirmed by dry-run probes against a deliberately invalid recipient (`__invalid_recipient_zzz__`) that `ipcmd` reports `user not found(...)` / `path not found(...)` with a non-zero exit code — useful later for honest success reporting. **No message was ever actually sent.**
+
+### Root Causes Found (six, layered)
+
+1. **`GlobalLock` on a `CF_HDROP` handle.** `GetClipboardData(CF_HDROP)` returns an `HDROP`, which is not a global-memory handle. `GlobalLock` on it returns `NULL`, so the `if (hd)` guard swallowed the entire branch and every pasted file was silently discarded. The single most direct cause of "pasting files does nothing".
+2. **Pasted text was display-only.** `AddTextPayload` created a payload flagged `isText`, but `ExecuteSend` only emitted `/file=` for non-text payloads and the text field was never included in the command line. Pasted text could be shown in the composer and would still never be transmitted.
+3. **`Ctrl+V` corrupted the recipient search.** The synthesized `WM_CHAR` for a handled shortcut was not consumed, so `Ctrl+V` appended a literal `v` to the search query — which filtered the list down to nothing and looked like the paste had broken the app.
+4. **Stack buffer overflow in command construction.** `cmdLine[4096]` was filled with `lstrcatW`/`wsprintfW` with no bounds tracking; `wcscat_s` into `toList[512]` could invoke the invalid-parameter handler. A handful of long attachment paths would overrun the buffer.
+5. **`--to` pre-selection was discarded.** `ParseCommandLine` ran *before* `InitRecipients`, and `InitRecipients` starts with `recipientCount = 0`, so every `--to` selection was wiped before it could be used. `FindIPMsgExecutable` itself was fine, but the ordering made CLI automation a no-op.
+6. **Success was reported unconditionally.** `CreateProcessW` was fire-and-forget and the status was hardcoded to `Sent successfully!` regardless of outcome.
+
+### Fixes
+
+- `CollectFilesFromDrop(HDROP)` is now the single file-collection path shared by paste and drag & drop. It reads the `HDROP` directly and sizes each path with a `DragQueryFileW(hd, i, NULL, 0)` probe before allocating, so long paths are neither truncated nor fixed at `MAX_PATH`.
+- `AppendMessageText` puts pasted text into the message body (appending on repeated pastes), so it is genuinely transmitted. Added a `CF_TEXT` ANSI fallback with `MultiByteToWideChar`.
+- Consolidated five ad-hoc `g_skipNextCharFor*` booleans into one `g_skipNextChar` flag set by every handled shortcut.
+- Replaced the fixed buffer with a growable `StrBuf` (heap, `realloc`-based, capped at `MAX_SEND_CMDLINE` = 32768) plus `StrBuf_AppendQuoted` for correct per-argument quoting and escaping. Added an explicit space between the recipient and body arguments — without it they formed adjacent quoted runs (`"a""b"`), which only happened to parse because the recipient contains no spaces.
+- `--to` is now recorded into `state->toArg` during parsing and applied by `ApplyRecipientSelection()` after `InitRecipients()`; it matches on display name or IP and appends unknown names as custom entries. Also applied on the `WM_COPYDATA` forward path.
+- `ExecuteSend` returns real success, waits briefly for `ipcmd`, and only claims success when the process was created. Sending is refused up front when there is no payload, and aborted if an attachment has disappeared since it was attached.
+- `AddFilePayload` validates existence, length, and capacity, and returns a status so callers can report precisely.
+- `IsIPMsgProcessRunning` no longer treats `ipcmd.exe` as the daemon — it is a short-lived console shim and matching it produced false positives that suppressed the auto-start.
+
+### Trade-offs
+- Message capacity moved from 1024 to `MESSAGE_CAP` (4096) chars and attachment paths to `MAX_PAYLOAD_PATH` (1024). Larger buffers for long pasted snippets, at the cost of a slightly larger static state — acceptable for a single-window tool.
+- `StrBuf` uses one heap allocation per send rather than a stack buffer. Worth it: the alternative was a fixed cap that either truncated user payloads or reintroduced the overflow.
+- Kept `WCSCAT`/`wcscat_s` out of the send path entirely; every append now goes through `StrBuf`.
+- Did **not** add an `ipmsg` config/response-code plumbing layer. The dispatch contract stays fire-and-forget against `ipcmd`, and honesty about failure comes from `CreateProcessW`'s return value.
+
+### Verification
+Per the "no unintended recipients" constraint, **nothing was sent**. Verification was done by (a) extracting the `ipcmd` grammar from the binary's usage strings, (b) probing `ipcmd` only with an invalid recipient / nonexistent file so it could only ever fail, and (c) building a regression harness that `#include`s the real `src/ip-send.c` and drives `CollectFilesFromDrop`, `AppendMessageText`, `BuildSendCommand`, `ApplyRecipientSelection`, and the send guards directly. Because the sandbox clipboard is unavailable (`OpenClipboard` returns `ERROR_ACCESS_DENIED` even for .NET callers), the harness synthesizes `DROPFILES` structures in global memory, which is byte-identical to what `CF_HDROP` delivers, exercising the same `DragQueryFileW` path.
+
+- 9 test groups, all passing: file attachment (including paths with spaces and duplicate suppression), text landing in the body and appearing in the generated command line, missing-attachment abort, both send guards, 64-attachment command-line construction staying within the `CreateProcessW` limit with all 64 `/file=` arguments emitted, exact long-path storage, search-query isolation after `Ctrl+V`, and `--to` matching/appending.
+- `pwsh -File .\build.ps1 ip-send` and `-Mode debug` both clean.
+- Runtime smoke test: single-instance window appears; double-launch toggles the instance off; a second launch carrying a file path forwards to the running window via `WM_COPYDATA` and exits `0` without creating a second window.
+- `ip-send --send` with no payload and with a recipient-but-no-payload both decline to dispatch, as intended.
+
+---
+
+## Cycle: `ip-send` — Multi-Megabyte Pastes Were Clipped
+
+### Reported Symptom
+Occasionally pasting file contents in the 1-10 MB range. The previous cycle made pasted text reach `ipcmd` at all, but the message body lived in a fixed `wchar_t messageText[4096]` array, so anything past ~4 K characters was silently truncated. Nothing in the UI indicated truncation.
+
+### Investigation
+Two hard limits collided:
+
+1. **Storage.** `MESSAGE_CAP` (4096) fixed the body size. `AppendMessageText` used `wcsncpy_s(..., _TRUNCATE)`, so a 10 MB paste became 4095 chars with no warning.
+2. **Transport.** Even with unbounded storage, a multi-megabyte body cannot ride the command line — Windows caps it near 32 KB, and `BuildSendCommand` already refused to exceed `MAX_SEND_CMDLINE`.
+
+The second limit was the interesting one, because it forced a decision about *how* to ship a large body. Re-reading the `ipcmd` usage block extracted from the binary earlier in this project showed the third send argument is `("msg_body" | /msgfile=path)` — `ipmsg` has a first-class mechanism for exactly this. Probed it against the installed `ipcmd.exe`:
+
+```text
+send "__invalid_recipient_zzz__" /msgfile=<20 MB utf8 file>   -> user not found(...)  stat=-1
+send "__invalid_recipient_zzz__" /msgfile=<utf16 file>        -> msgfile can't open or not UTF-8 (...) 0
+send "__invalid_recipient_zzz__" /msgfile=<missing file>      -> msgfile can't open or not UTF-8 (...) 2
+```
+
+Three facts established: `msgfile` is read before recipient resolution, it must be UTF-8, and it scales well past 10 MB. Every probe used a recipient that cannot exist, so **nothing was ever sent**.
+
+### Decision
+Asked whether a large paste should become the message body or a file attachment. Chose the body via `/msgfile`, which preserves the semantics of "this is my message". Worth noting the alternative is genuinely defensible for multi-megabyte payloads — IP Messenger's own protocol may not carry a 10 MB inline message — so this is the point most likely to need revisiting if large pastes turn out not to arrive.
+
+### Fixes
+
+- Promoted `StrBuf` from a send-command-only helper to the general string type and moved it above the state struct. The body is now `g_state.message`, a heap `StrBuf` with a `limit` field, so one implementation serves both the body (`MAX_MESSAGE_CHARS`, 128 MB) and the command buffer (`MAX_SEND_CMDLINE`, 32 KB). Deleted the fixed `messageText` / `messageLen` pair entirely rather than leaving a second copy of the truth.
+- `AppendMessageText` now appends via `StrBuf`, and `BuildSendCommand` routes the body inline when `MessageFitsInline()` and through `/msgfile=` otherwise. `WriteMessageTempFile` converts with `WideCharToMultiByte(CP_UTF8, ...)` and writes without a BOM, since `ipcmd` rejects anything that is not clean UTF-8.
+- `ExecuteSend` deletes the staged file immediately after `ipcmd` returns, on both success and failure paths.
+- **The UI was the subtler hazard.** `RenderTUIWindow` passed the body to `DrawTextW` for layout measurement; with a 10 MB body that alone would stall the UI thread indefinitely. Layout now runs against a bounded `MESSAGE_PREVIEW_CHARS` (2048) copy and appends a real total-size note (`... (5.0 MB of text)`), so the operator can see the true size.
+- **Second hazard: the native `EDIT` control.** Pushing megabytes into a multiline `EDIT` makes the window unusable to scroll and paint. Bodies above `MESSAGE_EDIT_MAX_CHARS` (65536) are send-only; `Insert` and click-to-edit report `Message is too large to edit here. It will be sent as-is.` `EN_CHANGE` also stopped mirroring text back unconditionally, since it fires while the tool itself is pushing text into the box.
+- Replaced the scattered `GetWindowTextW(g_hEdit, ...)` pairs with `SyncMessageFromEdit()` / `SyncEditFromMessage()` so the two representations cannot drift.
+- `WM_DESTROY` frees the body buffer; `WinMain` initializes its limit before `ParseCommandLine`.
+
+### Trade-offs
+- Bodies over 64 K chars cannot be edited in the composer, only replaced by pasting. This is a real functional reduction, chosen over a window that freezes. The threshold is one `#define` if it proves too conservative.
+- A transient temp file is written for large bodies. This is the only disk write the tool performs, it is deleted immediately, and it is `ipmsg`'s own documented mechanism rather than an invention.
+- 2048-char inline threshold leaves a lot of headroom below the 32 KB command-line limit. Raising it would avoid a temp file for medium messages, but the accounting gets fiddly once recipient lists and up to 64 attachment paths share the same budget.
+- Preview truncation means the operator cannot visually verify the tail of a large paste. The size note is a partial mitigation, not a solution.
+
+### Verification
+Still **no message was sent**. The harness links the real `src/ip-send.c` and drives 1 MB, 2 MB, and 10 MB bodies through `AppendMessageText` → `BuildSendCommand`, checking the staged file rather than any network call.
+
+- 11 test groups, all passing. Notably: 1 MB and 10 MB bodies retained with `len` matching the fixture exactly; staged files byte-compared against `WideCharToMultiByte(CP_UTF8, ...)` of the body; non-ASCII bodies round-tripped through the staged file with `MB_ERR_INVALID_CHARS` and confirmed BOM-free; attachments combining with a large body emit both `/file=` and `/msgfile=`; 64 attachments stay at 8549 chars; repeated pastes accumulate with CRLF separators.
+- Three harness bugs were found and fixed during this cycle, all of them assertion mistakes rather than product bugs: comparing UTF-8 bytes against the raw UTF-16 buffer, miscounting separator characters, and a `swprintf_s` argument mismatch that silently collapsed 64 distinct attachment names into one.
+- `pwsh -File .\build.ps1 -Mode release ip-send` clean; `--help` correct; window launches with title `Send via IP`; double-launch toggles the instance off.
+- End-to-end shape re-confirmed against the real `ipcmd.exe` using a 17 MB staged file at the tool's own temp path, with a non-existent recipient: `user not found(__invalid_recipient_zzz__)`, i.e. `msgfile` parsed and consumed before the send was rejected.
