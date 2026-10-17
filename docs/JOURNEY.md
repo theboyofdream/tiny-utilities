@@ -2261,7 +2261,7 @@ Asked whether a large paste should become the message body or a file attachment.
 - `AppendMessageText` now appends via `StrBuf`, and `BuildSendCommand` routes the body inline when `MessageFitsInline()` and through `/msgfile=` otherwise. `WriteMessageTempFile` converts with `WideCharToMultiByte(CP_UTF8, ...)` and writes without a BOM, since `ipcmd` rejects anything that is not clean UTF-8.
 - `ExecuteSend` deletes the staged file immediately after `ipcmd` returns, on both success and failure paths.
 - **The UI was the subtler hazard.** `RenderTUIWindow` passed the body to `DrawTextW` for layout measurement; with a 10 MB body that alone would stall the UI thread indefinitely. Layout now runs against a bounded `MESSAGE_PREVIEW_CHARS` (2048) copy and appends a real total-size note (`... (5.0 MB of text)`), so the operator can see the true size.
-- **Second hazard: the native `EDIT` control.** Pushing megabytes into a multiline `EDIT` makes the window unusable to scroll and paint. Bodies above `MESSAGE_EDIT_MAX_CHARS` (65536) are send-only; `Insert` and click-to-edit report `Message is too large to edit here. It will be sent as-is.` `EN_CHANGE` also stopped mirroring text back unconditionally, since it fires while the tool itself is pushing text into the box.
+- **Second hazard: the native `EDIT` control.** An earlier revision loaded the full body into the multiline `EDIT`, which freezes the UI on megabyte content, and later blocked editing entirely with a warning (the symptom the user reported). Current design: for bodies above `MESSAGE_EDIT_MAX_CHARS` (65536) the composer loads only the trailing window into the `EDIT` control (`g_editHeadLen` tracks the preserved head), and `SyncMessageFromEdit()` reconstructs the full body as head-prefix + edited-tail on exit paths only — EN_CHANGE no longer copies a multi-megabyte head into a fresh buffer on every keystroke. So the user can edit or append without losing any character, and sending still uses the full body via `/msgfile=`. `EN_CHANGE` no longer mirrors text on every keystroke (that was the per-keystroke copy); it only invalidates for repaint.
 - Replaced the scattered `GetWindowTextW(g_hEdit, ...)` pairs with `SyncMessageFromEdit()` / `SyncEditFromMessage()` so the two representations cannot drift.
 - `WM_DESTROY` frees the body buffer; `WinMain` initializes its limit before `ParseCommandLine`.
 
@@ -2278,3 +2278,78 @@ Still **no message was sent**. The harness links the real `src/ip-send.c` and dr
 - Three harness bugs were found and fixed during this cycle, all of them assertion mistakes rather than product bugs: comparing UTF-8 bytes against the raw UTF-16 buffer, miscounting separator characters, and a `swprintf_s` argument mismatch that silently collapsed 64 distinct attachment names into one.
 - `pwsh -File .\build.ps1 -Mode release ip-send` clean; `--help` correct; window launches with title `Send via IP`; double-launch toggles the instance off.
 - End-to-end shape re-confirmed against the real `ipcmd.exe` using a 17 MB staged file at the tool's own temp path, with a non-existent recipient: `user not found(__invalid_recipient_zzz__)`, i.e. `msgfile` parsed and consumed before the send was rejected.
+
+### Pasted-tool cycle: mwb.c validation & fix (2026-10-17)
+
+The user pasted `src/mwb.c`: a ~1.9k-line, single-file, pure-C Mouse-without-Borders variant. Server (physical mouse/keyboard PC) shows a 4-char pairing code; the client authenticates with HMAC-SHA256 challenge/response (mutual), deriving a session key that also gates the file channel. Discovery: UDP 24800 broadcast beacon (`MWB1`), input + text/file clipboard offers on TCP 24801 (16-byte length-prefixed `Msg` frames), file push/pull on TCP 24802. Cross-edge drag & drop: crossing the server's right edge with a file drag cancels the local drag (Esc), plates the selection with Ctrl+C, ships a `M_CLIP_FILES` offer; the client materialises it as an OLE `IDataObject` over `CFSTR_FILEDESCRIPTOR`/`CFSTR_FILECONTENTS` with a lazy `IStream` that pulls bytes from the peer on demand, and starts a real `DoDragDrop` via an alpha-1 layered "catcher" window that receives the synthetic mouse-down.
+
+Validation against internet docs (Microsoft Learn where possible): shell clipboard transfer semantics (lindex-indexed FileContents, group descriptor flags) match; layered windows with alpha >= 1 remain hit-testable (alpha = 0 does not) - the catcher trick is correct; Windows default TCP keepalive is ~2 h idle, useless for a peer that goes to sleep, hence `SIO_KEEPALIVE_VALS` (5 s/1 s); LL-hook procs must return promptly (`LLMHF_INJECTED`/`LLKHF_INJECTED` filter our own injections), which drove the `TryEnterCriticalSection` move path.
+
+Real defects found by reading (all fixed, see CHECKLIST 29): the clipboard offer serializer's 1-byte-per-entry NUL overflow (last entry = 1 byte past the heap block) was the only memory-safety bug; the rest were reliability/protocol issues - hook stalls behind multi-MB sends, a reconnect send race reading the socket outside the lock, keepalive-less dead-peer hangs, send/receive cap mismatches on name lengths, the first-move teleport after edge-cross (cookies on one physical position between hook event and park), stuck injected buttons, unhooked-hook leak, MSVC-only `%I64u`.
+
+Scope note re: win32/mac/win32 - the tool is strictly 2 peers today (no relay through an intermediate machine). The wire format itself is mac-implementable: `Msg`/`FileHdr` are 16-byte little-endian structs with no padding, and macOS is little-endian; text clipboard (`M_CLIP_TEXT`) is plain UTF-8. A mac peer would need its own renderer for file offers (the FileContents machinery is Windows-shell-only) and a Win32 VK/scancode table for `M_KEY`. Direcct-IP mode (`mwb client <ip>`) exists for networks that suppress UDP broadcasts.
+
+Follow-ups deliberately left open (recorded so they are not lost): no docs/mwb.md spec yet; PRD-convention gaps (custom CLI parsing/mutex/dpi instead of the common headers, `Local\mwb_single_instance` instead of the `Global\Tiny<Tool>Mutex` contract, global LL hooks that the PRD hard-rules out, log + received/ files next to the exe); single-peer topology; primary-monitor-only edge mapping; live two-machine drag test still pending (needs a real LAN pair).
+
+### 2026-10-17 (b) - the tunnel gets a mac side, and a place on the map
+
+The "how does the user say the peer is on the right/left/top/bottom" question produced the clean answer that a KVM edge is really a **tunnel pair of edges**: the server names ITS edge, and the mirrored edge on the client is implied by geometry (server Right enters the client at its Left; Above enters at its Bottom; etc.). That meant zero extra configuration on the receiving side and one small wire touch: `M_ENTER` now carries the client entry-edge code in `c` bits 1-2 (bit 0 stays the drag flag) and `M_LEAVE` carries the position along the tunnel edge instead of a bare y. Both files share the same `side_to_code()` mapping. On Windows the picker is a tray submenu ("Peer is on..." - Right/Left/Above/Below, checked, session-only per the no-persistence rule); on the Mac it is `--side` on the command line since v1 has no menu bar yet.
+
+Then the mac implementation (`src/mwb_mac.c`) got finished for real: the first pass still contained scaffolding (a placeholder in `offer_walk`, an `offer_files_out` that never actually published anything, a `ClipWatch` tail that harvested but discarded offers, `CFSTR()` used as a C file-scope initializer which is not a constant expression, and - the fun one - ASCII codes `'0'..'Z'` masquerading as mac virtual keycodes instead of the real `kVK_ANSI_*` values). All replaced, and the missing halves were appended: `pb_apply_text`/`handle_clip`, ServerNet, edge-aware `client_loop`, discovery/direct-IP ClientNet, tap install + Accessibility preflights, `flock` single instance and `main()` with `--side`. Ownership of a file offer transfers under `g_offer_lock` into the shared `g_offer` storage so the pull handler can serve pulls at paste time; `apply_offer` now sends the offer's own generation instead of our outbound one (that mix-up would have pulled the wrong generation entirely).
+
+Honest limits recorded for the next session with hardware: the mac binary has never been compiled (no mac here - `build_mac.sh` is the first step there); mouse delta Y sign, trackpad-vs-wheel scaling and the Caps Lock double-tap all need a real regression run; cross-machine OLE drag stays a Windows-only feature - the Mac receives file offers as real files under `~/mwb-received` placed on the pasteboard. docs/mwb.md and the PRD-convention (common headers, `Global\TinyMwbMutex`) still await the formal go-ahead.
+
+### 2026-10-17 (c) - from pasted tool to repo citizen
+
+The formal go-ahead happened the same day, so `mwb` stopped being a pasted outlier: it got a real spec (`docs/mwb.md` - ports, auth tag flow, message table, tunnel-side model, carve-outs), a PRD section (§21) that grants the deviations explicitly (LL hooks as the server's capture mechanism, tray + native dialogs, log + received-folder as user-data output with zero settings persistence), and a place in AGENTS' tool and target lists.
+
+The meaningful code change was the common-header migration. The CLI now goes through TinyCLI (a `--help` box fell out almost for free), DPI became Per-Monitor v2 via tiny_dpi.h - which, it turns out, was a real bug fix hiding in a convention: on scaled displays `GetSystemMetrics` used to hand back virtualized pixels, so the edge math and `SetCursorPos` parked the cursor in the wrong place; a PMv2-aware process gets true device pixels. The single-instance mutex moved to the `Global\TinyMwbMutex`/`Global\TinyMwbEvent` contract, which quietly changed UX for the better: previously a second launch silently did nothing; now it toggles the first one off, and the run loop became a `MsgWaitForMultipleObjectsEx` wait (the window-switcher pattern) so the event joins the message pump; a toggle also `shutdown()`s the socket, so the peer notices within a keepalive tick instead of hanging until its own timeout.
+
+Docs were left honest about scope: no common-header migration is possible on the mac side (`mwb_mac.c` has no Windows headers to include), and the cross-machine session matrix plus the whole mac hardware checklist (delta signs, wheel scaling, Accessibility flow) remain the two open rows in the ledger.
+
+### 2026-10-17 (d) - a file the tool reads but never writes
+
+The user asked the question the session-only rule was always going to hit: "I don't want to set up the same devices every time - the side especially." The compromise that keeps the no-persistence rule meaningful is asymmetry: the tool may READ a plain `mwb.txt` beside its binary (or `--config PATH`), but it will never WRITE one. Configuration stays user-owned text; the tool still saves nothing itself, so nothing to export/import/migrate and no hidden state. Keys are deliberately tiny - `mode`, `side`, `clipboard` - because everything else either rotates (the pairing code) or is per-session (the peer's IP). CLI arguments still win, bad keys get logged rather than guessed at, and the tray menu remains the live override.
+
+A side effect of wiring config `mode` was a long-overdue fix on the mac: bare `mwb-mac` with no arguments used to quietly become a client and start discovery; now it prints usage unless the mode comes from the command line or the config. Small change, fewer silent "am I the wrong side?" moments. The smoke test exercised the parser honestly too - a test file with one good mode/side/clipboard triple, one unknown key, and one bad value produced exactly "3 key(s) applied", two warning lines, a dialog-free server start with the configured side, and the usual clean toggle-off.
+
+Then the repo asked its own follow-up: does this match the config loading other utilities already have? The audit, per the owner's call, excludes context-menu (an unfinished tool - and its XML-to-registry apply is a write-system-state model mwb must not imitate anyway); with it set aside the repo has NO complete config-file loader: pixel-view's AppConfig struct is CLI-fed in-memory state, cmdx has no config today (the PRD's `--config config.json` line for it is unimplemented), and the only repo-wide settings convention is CLI args via tiny_cli.h. So mwb.txt is effectively the first config-file mechanism in this repo, and the format follows from necessity: plain key=value is the only thing both win32 and mac peers can parse as dependency-free C. The part that DID need matching was the common-header discipline: the duplicated ~50-line parser in the two peers is now `src/common/tiny_config.h` (TinyConfig_Load - plain C99, no windows.h, so both win32 and mac include it), both peers use it, warning/applied log lines stayed byte-identical in a re-run smoke test, and the header is registered in the AGENTS.md common-header lists.
+
+One more turn on the same key: three-channel granularity. "If all I want is clipboard sync - not keyboard, not mouse, not anything else - I must be able to say so." That demanded finding every send and inject path in both peers: the win32 LL hook callbacks and the client's SendInput sites, the mac event tap and CGEventPost sites, the pasteboard harvest/publish pair, and the offer/apply pair on each side. The chosen semantics keep the protocol untouched: a peer gates ITS OWN send and ITS OWN inject, so a channel is live only when both ends enable it - no negotiation on the wire, and the pairing code stays unchanged. The subtle cases got explicit treatment: mouse is the handover mechanism itself (mouse off means no hook installs and no cursor ever leaves), a controller-side keyboard-off parks the keys rather than letting them type into the wrong machine (Scroll Lock / double-Caps escape stays exempt as control-plane), file drag moved from the clipboard flag to its own files flag (so text can be off while file sync stays on), and the tray item is now honestly labelled "Sync clipboard text". The smoke test caught one self-inflicted wound before it shipped to real use: with mouse and keyboard both off the new hook-gating branch returned 1 AFTER spawning the network threads, self-killing the process and letting the next launch silently become a fresh primary; two full cycles later (clipboard-only start 28 seconds apart, then all-on), the start/stop ledger is clean - hooks skipped and beaconing on the clipboard-only boot, hooks installed on the all-on boot, zero processes after each toggle.
+
+## 2026-10-17: ip-send Restore From `.bak` After Unusable GUI Rewrite
+
+### Context
+
+While wiring mwb channel keys, the user asked to "restore ip-send bak because the GUI is
+non-usable - we try later". The working tree held an uncommitted, unjournaled ip-send
+rewrite. Three versions existed, all distinct (hash-checked):
+
+- **HEAD (`cdfcafe`, 2405 lines)** - last committed, journaled-good: paste dispatch fix +
+  multi-megabyte body support; composer verified working ("Send via IP", clean toggle).
+- **`src/ip-send.c.bak` (2427 lines)** - HEAD + a small refinement delta (63/41) that adds
+  the trailing-window editing of oversized bodies (`g_editHeadLen` + `SyncMessageFromEdit`):
+  bodies over `MESSAGE_EDIT_MAX_CHARS` (65536) are edited as head-prefix + edited-tail
+  instead of the send-only guard. This was the last known-good state.
+- **`src/ip-send.c` working (2026 lines)** - the rewrite of the .bak (351 in / 752 out): a
+  structural GUI change that ended non-usable. No JOURNEY entry had been written for it.
+
+### Action
+
+1. Preserved the rewrite as `src/ip-send.c.rewrite` (it was uncommitted; overwriting it
+   outright would have destroyed the attempt the user wants to retry later).
+2. Copied `src/ip-send.c.bak` -> `src/ip-send.c` (verified hash-equal after the copy).
+3. Left the tree's other uncommitted deltas alone: `docs/ip-send.md`'s 2-line change
+   documents trailing-window editing, which the restored `.bak` genuinely implements, so
+   it stays accurate; `build.ps1`'s `comctl32` for ip-send belongs to the rewrite attempt
+   but is harmless for the .bak build (the `mwb` target in build.ps1 is from the mwb
+   formalization and stays); `src/cmdx.ps1` changes are outside this task.
+4. Rebuilt: `pwsh -File .\build.ps1 -Mode release ip-send` - clean.
+5. Smoke: launch -> 2 s -> second launch -> first instance toggled off; 0 ip-send
+   processes remained.
+
+### Trade-off
+
+Twin files for now: `ip-send.c.bak` and `ip-send.c.rewrite` both sit in `src/`. Keep one
+of them only as long as the "try later" GUI attempt is pending; both are disposable
+afterwards.

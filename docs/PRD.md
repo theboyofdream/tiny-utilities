@@ -551,4 +551,31 @@ This version guarantees:
 
 ---
 
+# 21. MWB SPECIFICATION (LAN MOUSE-WITHOUT-BORDERS PEER, WIN32 <-> MACOS)
+
+* **Type:** Tray utility for two peers on one LAN; binary `mwb.exe` (win32) and `mwb-mac` (macOS, built Mac-side via `build_mac.sh`). Full spec: `docs/mwb.md`.
+* **Modes:** `server` (physical console; captures and shares input) and `client` (receives and injects). Roles are fixed per session; single instance per machine via `Global\TinyMwbMutex` / `Global\TinyMwbEvent` — a second launch cleanly stops the first.
+* **CLI:** `mwb [server|client [ip]] [--otp CODE] [--log FILE] [--help]`; pairing via 4-char caps-free OTP (alphabet without 0/O/1/I) with HMAC-SHA256 proofs (`'C'/'S'/'K'`) and file-channel auth (`'F'`). Session payload is **not encrypted** — trusted LANs only.
+* **Tunnel-side model:** the server names its handover edge (win32 tray submenu "Peer is on...", macOS `--side`); the client mirrors entry/exit automatically via `M_ENTER`/`M_LEAVE` fields. Session-only, default Right.
+* **Data channels:** UDP 24800 discovery (`MWB1` beacons), TCP 24801 input + clipboard, TCP 24802 files (`MWF1` push / `MWP1` lazy pull, generation-based offers). Keys on the wire are always Win32 VK codes.
+
+### Carve-outs granted to MWB (exceptions to Section 1)
+
+```text
+- Global system hooks ARE permitted in SERVER mode only (WH_MOUSE_LL / WH_KEYBOARD_LL are
+  the capture mechanism; unhooked on every exit path; client mode installs none).
+- UI: tray icon, popup menus, native MessageBox/OTP dialogs and ShellExecute folder-open.
+- Disk output: mwb.log beside the exe (5 MiB cap) and files received into <exe>\received
+  (win32) / ~/mwb-received (mac) are USER DATA, not persistence: NO configuration,
+  pairing codes, paths or flags are ever saved BY the tool; runtime settings remain
+  session-only. EXCEPTION - an optional READ-ONLY config file may be READ at startup:
+  default `mwb.txt` beside the exe/binary, or `--config PATH`; keys
+  `mode = server|client`, `side = right|left|up|down`, `clipboard = on|off`;
+  '#' comments; unknown keys logged and ignored; CLI arguments always win;
+  the tool never writes to the file.
+- Long-running process: stays resident in the tray until toggle-off (second launch) or Exit.
+```
+
+---
+
 # END OF PRD

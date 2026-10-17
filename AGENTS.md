@@ -1,16 +1,16 @@
 # AGENTS.md — Agent Guide
 
-Authoritative spec: **PRD.md**. Implementation status: **CHECKLIST.md**. Tool specs: `src/<tool>.c` -> `docs/<tool>.md` (`pin-to-top` | `find-my-mouse` | `color-picker` | `capture` | `pixel-view` | `ip-send` | `context-menu` | `ocr` | `window-switcher`) + `src/cmdx.ps1` -> `docs/cmdx.md`.
+Authoritative spec: **PRD.md**. Implementation status: **CHECKLIST.md**. Tool specs: `src/<tool>.c` -> `docs/<tool>.md` (`pin-to-top` | `find-my-mouse` | `color-picker` | `capture` | `pixel-view` | `ip-send` | `context-menu` | `ocr` | `window-switcher` | `mwb`) + `src/cmdx.ps1` -> `docs/cmdx.md`.
 
 ## HARD RULES
 
-- No background services, registry usage (except per-user Explorer context menus managed by `context-menu` and User PATH in `HKCU\Environment` managed by `cmdx`), disk persistence, config files, env vars, or global system hooks.
+- No background services, registry usage (except per-user Explorer context menus managed by `context-menu` and User PATH in `HKCU\Environment` managed by `cmdx`), disk persistence, config files (except mwb's optional **read-only** `mwb.txt` / `--config` settings file per PRD §21), env vars, or global system hooks.
 - One process per invocation; click-through overlays only; no GUI windows except overlays and native dialogs.
 - Must exit cleanly on toggle-off; compile with Clang (MSVC `clang-cl` or MinGW-w64 `clang`), never gcc. Strict Win32 C & GDI only (no DirectX).
 - Always explain what changes you made and why to the user after editing or creating any file.
 - **GIT RULE**: Agents must NOT run `git add`, `git commit`, or `git push` unless explicitly requested by the user.
-- **BUILD RULE**: Agents must ONLY build the target corresponding to the changed file: `pwsh -File .\build.ps1 [-Mode release|debug] <target>` (`pin-to-top` | `find-my-mouse` | `mouse-spotlight` | `color-picker` | `capture` | `pixel-view` | `ip-send` | `context-menu` | `ocr` | `window-switcher` | `all`). Outputs to `dist/release/` (default optimized) or `dist/debug/` (PDB/DWARF symbols). Always use explicit, canonical target names.
-- **COMMON HEADERS RULE**: Agents must ALWAYS reuse shared common headers in `src/common/` (`tiny_cli.h`, `tiny_ipc.h`, `tiny_dpi.h`, `tiny_gui.h`, `font.h`, `clipboard.h`, `color-thief-algorithm.h`) for CLI argument parsing, IPC single-instance toggle handling, DPI awareness, GUI/overlay bounds, font creation, and clipboard access. NEVER reinvent custom/duplicate boilerplate implementations for functionality already provided by existing common headers.
+- **BUILD RULE**: Agents must ONLY build the target corresponding to the changed file: `pwsh -File .\build.ps1 [-Mode release|debug] <target>` (`pin-to-top` | `find-my-mouse` | `mouse-spotlight` | `color-picker` | `capture` | `pixel-view` | `ip-send` | `context-menu` | `ocr` | `window-switcher` | `mwb` | `all`). Outputs to `dist/release/` (default optimized) or `dist/debug/` (PDB/DWARF symbols). Always use explicit, canonical target names. (`mwb` has a macOS sibling `src/mwb_mac.c`, built only on a Mac via `build_mac.sh`.)
+- **COMMON HEADERS RULE**: Agents must ALWAYS reuse shared common headers in `src/common/` (`tiny_cli.h`, `tiny_ipc.h`, `tiny_dpi.h`, `tiny_gui.h`, `font.h`, `clipboard.h`, `color-thief-algorithm.h`, `tiny_config.h`) for CLI argument parsing, IPC single-instance toggle handling, DPI awareness, GUI/overlay bounds, font creation, clipboard access, and read-only key=value config loading. NEVER reinvent custom/duplicate boilerplate implementations for functionality already provided by existing common headers.
 
 ## Shared Common Headers (`src/common/`)
 
@@ -20,6 +20,7 @@ Authoritative spec: **PRD.md**. Implementation status: **CHECKLIST.md**. Tool sp
 - [`tiny_gui.h`](src/common/tiny_gui.h): Win32 GUI & overlay helpers (multi-monitor bounds `TinyGUI_GetVirtualScreenBounds`, alpha dimming `TinyGUI_ApplyDimOverlay`, border resize hit-testing `TinyGUI_HitTestResizeBorders`, scaled fonts).
 - [`font.h`](src/common/font.h): Centralized typography, monospace/UI font constructors, and physical DPI font scaling (`TinyFont_Create`, `TinyFont_CreateMonospace`, `TinyFont_ScaleSize`).
 - [`clipboard.h`](src/common/clipboard.h): Win32 Unicode text, bitmap, and file drop clipboard operations (`TinyClipboard_SetText`, `TinyClipboard_SetBitmap`, `TinyClipboard_GetText`).
+- [`tiny_config.h`](src/common/tiny_config.h): Platform-neutral read-only `key = value` config loader (`TinyConfig_Load`, trim/lower, '#' comments) — the tool never writes to the file (mwb / PRD carve-out).
 - [`color-thief-algorithm.h`](src/common/color-thief-algorithm.h): Dynamic dominant wallpaper accent color extractor.
 
 ## IPC Contract Overview

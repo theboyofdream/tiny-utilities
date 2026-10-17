@@ -108,7 +108,7 @@ $TARGET_CONFIGS = [ordered]@{
     }
     'ip-send' = @{
         Subsystem = 'windows'
-        Libs      = @('user32', 'gdi32', 'shell32', 'comdlg32', 'advapi32')
+        Libs      = @('user32', 'gdi32', 'shell32', 'comdlg32', 'advapi32', 'comctl32')
     }
     'context-menu' = @{
         Subsystem = 'windows'
@@ -128,6 +128,10 @@ $TARGET_CONFIGS = [ordered]@{
         Subsystem   = 'windows'
         Libs        = @('user32', 'gdi32')
         ExtraMinGW  = @('-municode')
+    }
+    'mwb' = @{
+        Subsystem = 'windows'
+        Libs      = @('ws2_32', 'user32', 'gdi32', 'shell32', 'comdlg32', 'ole32', 'uuid', 'bcrypt')
     }
 }
 
