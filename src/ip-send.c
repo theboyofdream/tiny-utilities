@@ -265,26 +265,54 @@ static void SetMessageText(const wchar_t* text) {
     StrBuf_Append(&g_state.message, text ? text : L"");
 }
 
-// Copies the current body into the native edit box for in-place editing.
-static void SyncEditFromMessage(void) {
-    if (g_hEdit && IsWindow(g_hEdit)) {
-        SetWindowTextW(g_hEdit, g_state.message.data ? g_state.message.data : L"");
+// The native multiline EDIT control cannot hold a multi-megabyte body, so for
+// large bodies we edit only a trailing window of it. The full body stays
+// authoritative in g_state.message; the head before g_editHeadLen is preserved.
+static size_t g_editHeadLen = 0;
+
+// Reads the edit box back into the authoritative body, preserving the head prefix
+// from before editing. Called on exit paths only (not per keystroke) so a large
+// head is not copied into a new buffer on every EN_CHANGE.
+static void SyncMessageFromEdit(void) {
+    if (!g_hEdit || !IsWindow(g_hEdit)) return;
+    int editLen = GetWindowTextLengthW(g_hEdit);
+    size_t headLen = g_editHeadLen;
+    if (headLen > g_state.message.len) headLen = g_state.message.len;
+
+    wchar_t* buf = NULL;
+    if (editLen > 0) {
+        buf = (wchar_t*)malloc(((size_t)editLen + 1) * sizeof(wchar_t));
+        if (!buf) return;
+        GetWindowTextW(g_hEdit, buf, editLen + 1);
+    }
+
+    StrBuf nb;
+    StrBuf_InitLimit(&nb, MAX_MESSAGE_CHARS);
+    // Preserve the head from the original body, then the edited tail.
+    StrBuf_AppendN(&nb, g_state.message.data ? g_state.message.data : L"", headLen);
+    if (buf) StrBuf_Append(&nb, buf);
+    free(buf);
+
+    if (!nb.failed) {
+        StrBuf_Free(&g_state.message);
+        g_state.message = nb; // reuse buffer
+    } else {
+        StrBuf_Free(&nb);
     }
 }
 
-// Reads the edit box back into the authoritative body.
-static void SyncMessageFromEdit(void) {
+// Copies the editable tail of the body into the native edit box. For a small
+// body that is the whole message; for a huge one it is the last window.
+static void SyncEditFromMessage(void) {
     if (!g_hEdit || !IsWindow(g_hEdit)) return;
-    int len = GetWindowTextLengthW(g_hEdit);
-    if (len <= 0) {
-        StrBuf_InitLimit(&g_state.message, MAX_MESSAGE_CHARS);
-        return;
+    size_t len = g_state.message.len;
+    if (len > MESSAGE_EDIT_MAX_CHARS) {
+        g_editHeadLen = len - MESSAGE_EDIT_MAX_CHARS;
+        SetWindowTextW(g_hEdit, (g_state.message.data ? g_state.message.data : L"") + g_editHeadLen);
+    } else {
+        g_editHeadLen = 0;
+        SetWindowTextW(g_hEdit, g_state.message.data ? g_state.message.data : L"");
     }
-    wchar_t* buf = (wchar_t*)malloc(((size_t)len + 1) * sizeof(wchar_t));
-    if (!buf) return;
-    GetWindowTextW(g_hEdit, buf, len + 1);
-    SetMessageText(buf);
-    free(buf);
 }
 
 // True when the body is small enough to hand to ipcmd as an inline argument.
@@ -1411,11 +1439,11 @@ static void HandlePaste(HWND hWnd) {
         ShowStatusToast(hWnd, L"Warning: Nothing usable on the clipboard.");
     }
 
-    // Keep the edit box in step, but only when the body is small enough for the
-    // native control to stay responsive.
-    if (g_state.message.len <= MESSAGE_EDIT_MAX_CHARS) {
-        SyncEditFromMessage();
-    }
+    // Keep the edit box in step. For bodies that exceed the native control's
+// paint-and-scroll budget this loads only the trailing window; for smaller
+// bodies it loads the whole message. Both cases preserve g_editHeadLen so
+// SyncMessageFromEdit can reassemble the full original text.
+    SyncEditFromMessage();
 
     InvalidateRect(hWnd, NULL, FALSE);
 }
@@ -1851,13 +1879,10 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
 
     case WM_COMMAND: {
         if (LOWORD(wParam) == 1001 && HIWORD(wParam) == EN_CHANGE) {
-            // EN_CHANGE also fires while we programmatically push text into the
-            // box; only mirror it back when the body is editable in place.
-            if (g_hEdit && IsWindow(g_hEdit) && g_state.messageMode &&
-                g_state.message.len <= MESSAGE_EDIT_MAX_CHARS) {
-                SyncMessageFromEdit();
-                InvalidateRect(hWnd, NULL, FALSE);
-            }
+            // Do not mirror text on every keystroke: for a large body that would
+            // copy the multi-megabyte head into a new buffer each time. The body
+            // is re-synced once on exit paths (Escape/Insert toggle/Ctrl+Enter).
+            InvalidateRect(hWnd, NULL, FALSE);
             return 0;
         }
         break;
@@ -1959,12 +1984,6 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
         }
 
         if (PtInRect(&g_msgEditRect, pt)) {
-            // Very large bodies stay send-only: loading megabytes into a native
-            // multiline EDIT makes the window unusable to scroll and paint.
-            if (g_state.message.len > MESSAGE_EDIT_MAX_CHARS) {
-                ShowStatusToast(hWnd, L"Message is too large to edit here. It will be sent as-is.");
-                return 0;
-            }
             g_state.messageMode = true;
             if (g_hEdit) {
                 SyncEditFromMessage();
@@ -1973,6 +1992,11 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
                              g_msgEditRect.bottom - g_msgEditRect.top,
                              SWP_NOZORDER | SWP_SHOWWINDOW);
                 SetFocus(g_hEdit);
+                int len = GetWindowTextLengthW(g_hEdit);
+                SendMessageW(g_hEdit, EM_SETSEL, (WPARAM)len, (LPARAM)len);
+            }
+            if (g_state.message.len > MESSAGE_EDIT_MAX_CHARS) {
+                ShowStatusToast(hWnd, L"Editing the last portion only; earlier text is kept.");
             }
             InvalidateRect(hWnd, NULL, FALSE);
             return 0;
@@ -2019,7 +2043,7 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
             const wchar_t* incomingCmd = (const wchar_t*)pcds->lpData;
             ParseCommandLine(incomingCmd, &g_state);
             ApplyRecipientSelection();
-            if (g_hEdit && IsWindow(g_hEdit) && g_state.message.len <= MESSAGE_EDIT_MAX_CHARS) {
+            if (g_hEdit && IsWindow(g_hEdit)) {
                 SyncEditFromMessage();
             }
             SetForegroundWindow(hWnd);
@@ -2090,12 +2114,6 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
         }
 
         if (wParam == VK_INSERT) {
-            if (!g_state.messageMode && g_state.message.len > MESSAGE_EDIT_MAX_CHARS) {
-                // Send-only for huge bodies; opening the native EDIT would freeze.
-                ShowStatusToast(hWnd, L"Message is too large to edit here. It will be sent as-is.");
-                g_skipNextChar = true;
-                return 0;
-            }
             g_state.messageMode = !g_state.messageMode;
             if (g_state.messageMode) {
                 if (g_hEdit) {
@@ -2105,8 +2123,11 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
                                  g_msgEditRect.bottom - g_msgEditRect.top,
                                  SWP_NOZORDER | SWP_SHOWWINDOW);
                     SetFocus(g_hEdit);
-                    int len = (int)g_state.message.len;
+                    int len = GetWindowTextLengthW(g_hEdit);
                     SendMessageW(g_hEdit, EM_SETSEL, (WPARAM)len, (LPARAM)len);
+                }
+                if (g_state.message.len > MESSAGE_EDIT_MAX_CHARS) {
+                    ShowStatusToast(hWnd, L"Editing the last portion only; earlier text is kept.");
                 }
             } else {
                 if (g_hEdit) {
@@ -2115,6 +2136,7 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
                 }
                 SetFocus(hWnd);
             }
+            g_skipNextChar = true; // Insert itself must not become a search character
             InvalidateRect(hWnd, NULL, FALSE);
             return 0;
         }

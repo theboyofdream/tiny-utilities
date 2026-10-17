@@ -67,7 +67,7 @@ ip-send.exe [--context-menu register|unregister|true|false]
     - Bodies at or below `SEND_INLINE_MAX` (2048 chars) are passed to `ipcmd` as the inline `msg_body` argument.
     - Anything larger is staged as a UTF-8 temp file and passed as `ipmsg`'s documented `/msgfile=<path>` argument, sidestepping the ~32 KB Windows command-line limit. The file is deleted immediately after `ipcmd` returns. (Verified: `ipcmd` rejects non-UTF-8 msgfiles with `msgfile can't open or not UTF-8`, so the staged file is always BOM-less UTF-8.)
     - The composer shows the first 2048 characters plus a true total-size note (`... (5.0 MB of text)`) rather than laying out the whole body.
-    - Bodies over `MESSAGE_EDIT_MAX_CHARS` (65536) are send-only: pressing `Insert` or clicking the message area reports `Message is too large to edit here. It will be sent as-is.` instead of loading megabytes into the native multiline `EDIT` control, which would make the window unusable.
+    - Bodies over `MESSAGE_EDIT_MAX_CHARS` (65536) are not loaded wholesale into the native multiline `EDIT` control. Instead, editing (`Insert` or clicking the message area) opens the control on the trailing window and the full body is reassembled as head-prefix + edited-tail on exit, so you can edit or append at the end without losing any character.
   - `CF_HDROP` handles are read directly as `HDROP` values (locking one with `GlobalLock` yields `NULL` and silently discards the paste), and the clipboard is opened with a short retry so a transiently-held clipboard no longer makes paste a no-op.
   - `Ctrl+V`, `Ctrl+O`, `Ctrl+D`, `Ctrl+0/+/-`, `r`, `/` and `Space` are consumed by their handlers and never leak their character into the recipient search field.
 

@@ -29,6 +29,7 @@ Desktop.ini
 *.tmp
 *.log
 *.bak
+*.rewrite
 *.swp
 *.swo
 *~
