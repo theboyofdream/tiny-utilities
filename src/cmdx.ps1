@@ -62,28 +62,76 @@ $global:Commands = [ordered]@{
     }
 
     'zw' = {
-        $p = @(
-            'C:\ITAMEssential'
-            'C:\xampp8\htdocs\business_eprompto'
-            '%USERPROFILE%\Desktop\ITAM\windows'
-            '%USERPROFILE%\Desktop\ITAM\windows 02'
-            '%USERPROFILE%\Desktop\ITAM\windows-server'
-            '%USERPROFILE%\Desktop\ITAM\mac'
-            'D:\rhel-itam\v2'
-            '%USERPROFILE%\Desktop\playground\windows-log-analyser'
-            '%USERPROFILE%\Downloads\winlogana'
-            '%USERPROFILE%\Desktop\playground\tiny-windows-utilites'
-            '%USERPROFILE%\Desktop\playground\shdcn-registry-gallery'
-            '%USERPROFILE%\Desktop\playground\01 dsa'
-            '%USERPROFILE%\Desktop\playground\tui'
-            'D:\tab-walker'
-            '%USERPROFILE%\Desktop\playground\itam-logs'
-            '%USERPROFILE%\Downloads\hdd_analyse'
-        ) |  ForEach-Object {
-			[Environment]::ExpandEnvironmentVariables($_)
-		}
-
-		& "$env:LOCALAPPDATA\Programs\Zed\bin\zed.exe" @paths
+        $root = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $PROFILE }
+        $file = Join-Path $root 'zw-projects.txt'
+        $zed  = "$env:LOCALAPPDATA\Programs\Zed\bin\zed.exe"
+        if (-not (Test-Path $file)) { $null = New-Item $file -ItemType File }
+    
+        $expand  = { param($p) [Environment]::ExpandEnvironmentVariables($p) }
+        $entries = @(Get-Content $file | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+        $rest    = @($args | Select-Object -Skip 1)
+    
+        switch -Regex ($args[0]) {
+            '^(ls|list)$' {
+                for ($i = 0; $i -lt $entries.Count; $i++) {
+                    '{0,2}. {1}' -f ($i + 1), $entries[$i]
+                }
+            }
+            '^add$' {
+                # zw add                -> current folder
+                # zw add C:\a D:\b      -> several folders
+                $items = if ($rest) { $rest } else { , (Get-Location).Path }
+                $list  = @($entries)
+                $added = 0
+                foreach ($item in $items) {
+                    $p = & $expand $item
+                    if (-not (Test-Path -LiteralPath $p -PathType Container)) {
+                        Write-Warning "Not a folder: $p"; continue
+                    }
+                    $p = (Resolve-Path -LiteralPath $p).Path
+                    if ($list | Where-Object { (& $expand $_) -ieq $p }) {
+                        Write-Host "Already listed: $p"; continue
+                    }
+                    $list += $p
+                    Write-Host "Added: $p"
+                    $added++
+                }
+                if ($added) { [IO.File]::WriteAllLines($file, [string[]]$list) }
+            }
+            '^(rm|remove)$' {
+                # zw rm 1 2 3 4   (numbers as shown by zw ls; a path also works)
+                if (-not $rest) { Write-Warning 'Usage: zw rm <number> [<number> ...]'; return }
+                $drop = @()
+                foreach ($t in $rest) {
+                    $hit = @()
+                    if ($t -match '^\d+$') {
+                        $idx = [int]$t - 1
+                        if ($idx -ge 0 -and $idx -lt $entries.Count) { $hit = @($idx) }
+                    } else {
+                        $x = & $expand $t
+                        for ($i = 0; $i -lt $entries.Count; $i++) {
+                            if ((& $expand $entries[$i]) -ieq $x) { $hit += $i }
+                        }
+                    }
+                    if (-not $hit) { Write-Warning "No match: $t"; continue }
+                    $drop += $hit
+                }
+                if (-not $drop) { return }
+                $keep = @(for ($i = 0; $i -lt $entries.Count; $i++) {
+                    if ($drop -contains $i) { Write-Host "Removed: $($entries[$i])" }
+                    else { $entries[$i] }
+                })
+                [IO.File]::WriteAllLines($file, [string[]]$keep)
+            }
+            default {
+                $paths = foreach ($e in $entries) {
+                    $p = & $expand $e
+                    if (Test-Path -LiteralPath $p) { $p } else { Write-Warning "Missing, skipped: $p" }
+                }
+                if (-not $paths) { Write-Warning 'No folders. Use: zw add <path>'; return }
+                & $zed @paths
+            }
+        }
     }
 
     'refreshenv' = {
