@@ -379,10 +379,47 @@ Legend: `[x]` done & verified, `[ ]` known gap, `[-]` not applicable.
   - Added rich markdown release body with Quick Start guide, hotkeys reference table, and feature highlights.
 - [x] Bumped version to `1.0.1`.
 
+## 29. KYPER AGENT CONTROL PLANE (`src/kyper.c` -> `kyper.exe` — updated 2026-10-26)
+- [-] Status: **Experimental** — core hub implemented & smoke tested; API surface and steering behavior under evaluation.
+- [x] Console server, one process per invocation: single-instance toggle (`tiny_ipc.h`) with `Global\TinyKyperMutex` / `Global\TinyKyperEvent`; bare second launch signals exit, Ctrl+C exits cleanly (verified toggle exit 0 and port freed via netstat).
+- [x] CLI: `--user <name> --pass <secret>` required to start (HTTP Basic auth held in memory only), `--port N` (default 8080), `--match a,b,c` (default `opencode,claude,codex`; first token selects the spawn binary resolved via `SearchPathW`), `--help` support.
+- [x] API-only HTTP hub on `0.0.0.0:<port>` (no HTML by user decision):
+  - `GET /` → `200` JSON: `{port, statusError, status, agents:[{pid,name,path,mode}]}`.
+  - `POST /spawn` (`dir=`,`args=`), `/steer` (`pid=`,`msg=`), `/kill` (`pid=`) → `200`/`400` plain-text status.
+  - Unknown route → `404`; missing/bad Basic auth → `401` + `WWW-Authenticate: Basic realm="Kyper"`.
+- [x] Agent listing: `CreateToolhelp32Snapshot` scan, case-insensitive substring match against `--match` tokens; path via `QueryFullProcessImageNameW` when accessible; `mode` = `pipe` (hub-owned stdin) or `console` (external).
+- [x] Spawning: `CreateProcessW` in requested workdir with a hub-owned anonymous stdin pipe (batch steering); no `system()` anywhere; up to 16 slots with automatic pruning of dead slots.
+- [x] Steering (two combined mechanisms, per spec decision): pipe write for hub-spawned agents; `AttachConsole` + `WriteConsoleInputW` injection for external agents, always appending a final Enter (verified against external `cmd /k`: injected `exit` closed it; `dir >> %TEMP%\injout.txt` executed).
+- [x] Killing: `TerminateProcess` + slot cleanup; unopenable PID → `400 Cannot open process N.`
+- [x] mDNS responder (shared `common/mdns.h`, added 2026-10-26, fixed default name): announces **`kyper.local`** (A record for first LAN IPv4, additional PTR+SRV) plus service discovery PTR `_http._tcp.local` → `kyper._http._tcp.local` (SRV advertises the HTTP port, target `kyper.local`, TTL 60); dedicated 20 ms poll thread, degrade notice when UDP 5353 is busy (HTTP stays reachable by raw IP). Verified: banner shows `mDNS announce: kyper.local`, log `mDNS responder active: kyper.local`, UDP 5353 bound while running, and the mDNS thread joins cleanly on toggle-off (no hang, no leaks).
+- [x] Verified end-to-end from PowerShell: 401 / JSON status / spawn (banner "Spawned agent PID … (pipe steering)") / pipe steer / kill / bogus kill → 400 / unknown route → 404 / toggle-off — 2026-10-26.
+- [x] Build rule verified: `pwsh -File .\build.ps1 kyper` builds `dist/release/kyper.exe` cleanly; full `all` release build green.
+
+## 30. WHISPER-CAST LAN TEXT TYPER (`src/whisper-cast.c` -> `whisper-cast.exe` — updated 2026-10-26)
+- [-] Status: **Experimental** — core typer implemented; real-phone mDNS verification outstanding.
+- [x] Console server, one process per invocation: single-instance toggle with `Global\TinyWhisperCastMutex` / `Global\TinyWhisperCastEvent`; second launch exits the running instance cleanly (verified exit 0).
+- [x] CLI: `--port N` (default 7447), `--name <label>` (default `whisper-cast`; single DNS label), `--help` support.
+- [x] API-only (no HTML by user decision): only `POST /type` with raw UTF-8 body (≤ 2000 wide chars; oversize → `400`); `GET /` → `404`; built-in phone page and mDNS TXT path record removed.
+- [x] Injection: `SendInput` with `KEYEVENTF_UNICODE` DOWN/UP pairs, 32 pairs per call + 2 ms pause, `\n` → VK_RETURN, `\t` → VK_TAB, always appends a line-submit Enter (verified: posted `echo wc-typed-ok > %TEMP%\wcout.txt` executed and created the file).
+- [x] mDNS responder thread (shared `src/common/mdns.h`): binds LAN:5353 on first non-loopback IPv4, answers A for `<name>.local` (additional PTR+SRV) and PTR `_http._tcp.local` (additional SRV+A), TTL 60; degrade notice when 5353 is busy (HTTP still reachable by raw IP).
+- [x] mDNS verified at debug level: question parsed (`qname=[whisper-cast.local]`), answer emitted, and the responder's own socket received the looped-back reply (A rlen=4 + PTR + SRV); real-phone wire check is the remaining external verification (Windows `IP_MULTICAST_LOOP` only feeds the sending socket; `pktmon` needs admin).
+- [x] Bug fix: `mdns_string_extract` output is unterminated with a trailing dot — added `ExtractMdnsName` helper (strips dot, NUL-terminates) for name matching.
+- [x] Build rule verified: `pwsh -File .\build.ps1 whisper-cast` builds `dist/release/whisper-cast.exe` cleanly.
+
+## 31. SHARED NETWORK HEADERS (`src/common/` — updated 2026-10-26)
+- [x] `tiny_http.h`: shared HTTP API header for the two new network tools — request load/parse (8 KB caps), 100-continue skip, form/urldecode, Basic-auth token, UTF-8/UTF-16 conversion, `TinyHTTP_GetFirstLanSockaddr`, reply helpers. `TinyHTTP_ReplyRedirectHome` removed: POST endpoints reply `200`/`400` text directly since redirect followers (.NET) strip the Authorization header, faking a `401`.
+- [x] Reliability fixes folded into the shared header: `TinyHTTP_SendAll` ordering (declared before first use — fixed release build), accepted-socket fix (deregister `WSAEventSelect` before `FIONBIO=0`, else `recv` → WSAEWOULDBLOCK 10035).
+- [x] `mdns.h`: vendored public-domain single-header mDNS responder; documented gotcha: `mdns_string_extract` result is not NUL-terminated and keeps a trailing dot.
+
 ## Open items / notes
 - CPU idle % not re-measured; loop is event-wait based (sleeps 16 ms) so expected < 0.2%.
 - Manual visual verification of overlay rendering (border/disc appearance, click-through)
   still recommended in a real desktop session.
+- `whisper-cast`: verify mDNS reply reachability from a real phone on the LAN (same-host
+  loopback probes cannot see the reply on Windows — `IP_MULTICAST_LOOP` only feeds the
+  sending socket; `pktmon` capture requires admin).
+- `kyper`: verify `kyper.local` (mDNS) resolution from a real phone/second machine on the LAN — same-host loopback probes cannot see the multicast reply on Windows (`IP_MULTICAST_LOOP` only feeds the sending socket).
+- `kyper`: spawn binary (`--match` first token) assumes the AI-CLI executables are on PATH.
 ## 29. MWB (mouse-without-borders) - FIRST PASS VALIDATION & FIX (2026-10-17)
 - [x] Pasted `src/mwb.c` (self-contained KVM share + clipboard/file sync; server = physical-input PC, client = remote PC). Validated against Microsoft docs (shell clipboard transfer, layered-window hit testing, LL-hook contract, Winsock keepalive semantics). Not yet covered by PRD.md.
 - [x] Fixed 1-byte heap overflow in `offer_serialize`: per-entry UTF-8 NUL was written one byte past the reserved region; the last entry wrote past the malloc block. Block now allocated `total + 1`; per-entry conversion result validated.
@@ -434,3 +471,9 @@ Legend: `[x]` done & verified, `[ ]` known gap, `[-]` not applicable.
 - [x] Per-channel config keys (`mouse`, `keyboard`, `files` alongside `clipboard` in the same 4-key `mwb.txt`): each peer gates its own send + inject paths (no wire/protocol changes; channel live only if both peers enable it). Win32: hooks install only for enabled channels (mouse hook = handover mechanism; keys parked-but-swallowed while remote when keyboard off; Scroll Lock escape always alive); drag detection + apply_offer + on_clip_update + handle_clip + tray "Send file" all gated on the `files` flag; clipboard text gated separately (files can be on with text off). macOS: same gates on the event tap (per-event-type), client injection, pasteboard harvest/publish and the ClipWatch loop; tap skipped entirely when mouse+keyboard are both off (Caps double-tap emergency exempt from the keyboard gate). Menu item relabelled "Sync clipboard text" (files ride their own flag now). Fixed found-in-smoke bug: dual-off start used to self-exit after spawning (`return 1` after the `!hm && !hk` check) — now logs "input hooks skipped" and keeps running. Verified: clipboard-only start + toggle-off (0 processes left) and all-on start + toggle-off.
 - [x] ip-send restore: the uncommitted GUI rewrite found in `src/ip-send.c` (2026 lines) rendered the composer unusable; per user request the pre-rewrite state kept in `src/ip-send.c.bak` (2427 lines ~ last known-good) was restored to `src/ip-send.c`, the discarded rewrite preserved as `src/ip-send.c.rewrite` for a later attempt, rebuild green, double-launch toggle verified (first instance exits on second launch, 0 stray processes). See JOURNEY entry for the full three-version picture.
 - [ ] Open: live two-machine session matrix (win↔win), mac hardware checklist (§30), `HOW_I_USE_IT.md` mention.
+
+- `whisper-cast`: verify mDNS reply reachability from a real phone on the LAN (same-host
+  loopback probes cannot see the reply on Windows — `IP_MULTICAST_LOOP` only feeds the
+  sending socket; `pktmon` capture requires admin).
+- `kyper`: verify `kyper.local` (mDNS) resolution from a real phone/second machine on the LAN — same-host loopback probes cannot see the multicast reply on Windows (`IP_MULTICAST_LOOP` only feeds the sending socket).
+- `kyper`: spawn binary (`--match` first token) assumes the AI-CLI executables are on PATH.

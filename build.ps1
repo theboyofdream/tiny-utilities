@@ -133,6 +133,16 @@ $TARGET_CONFIGS = [ordered]@{
         Subsystem = 'windows'
         Libs      = @('ws2_32', 'user32', 'gdi32', 'shell32', 'comdlg32', 'ole32', 'uuid', 'bcrypt')
     }
+    'kyper' = @{
+        Subsystem  = 'console'
+        Libs       = @('ws2_32', 'iphlpapi', 'user32', 'gdi32', 'shell32')
+        ExtraMinGW = @('-municode')
+    }
+    'whisper-cast' = @{
+        Subsystem  = 'console'
+        Libs       = @('ws2_32', 'iphlpapi', 'user32', 'gdi32', 'shell32')
+        ExtraMinGW = @('-municode')
+    }
 }
 
 function Resolve-TargetName([string]$Name) {

@@ -83,6 +83,14 @@ static inline void TinyCLI_Parse(int argc, wchar_t **argv, const CliOption *opts
                 matched = true;
                 if (opts[j].type != CLI_OPT_BOOL && i + 1 < argc) {
                     valStr = argv[++i];
+                } else if (opts[j].type == CLI_OPT_BOOL && i + 1 < argc) {
+                    /* Consume an explicit boolean literal so "--flag false" clears the
+                     * flag (space syntax); any other following token is left alone. */
+                    const wchar_t *nxt = argv[i + 1];
+                    if (_wcsicmp(nxt, L"true") == 0 || _wcsicmp(nxt, L"false") == 0 ||
+                        wcscmp(nxt, L"0") == 0 || wcscmp(nxt, L"1") == 0) {
+                        valStr = argv[++i];
+                    }
                 }
             } else if (argv[i][optLen] == L'=' && _wcsnicmp(argv[i], opts[j].name, optLen) == 0) {
                 matched = true;

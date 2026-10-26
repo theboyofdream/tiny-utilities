@@ -2353,3 +2353,63 @@ rewrite. Three versions existed, all distinct (hash-checked):
 Twin files for now: `ip-send.c.bak` and `ip-send.c.rewrite` both sit in `src/`. Keep one
 of them only as long as the "try later" GUI attempt is pending; both are disposable
 afterwards.
+
+---
+
+## Cycle: `kyper` — New Tool: AI-CLI Agent Control Plane (API-only) (2026-10-26)
+
+### Context & Spec
+- New user spec (`docs/spec-kyper.md`): a LAN hub that lists running AI-CLI agent processes (`opencode`, `claude`, `codex`, custom match list), spawns new agents in a chosen directory, steers them with text, and kills them — controllable from a phone on the same network.
+- Decisions taken with the user: name `kyper`, default port 8080, `Global\TinyKyperMutex|Event`, credentials via `--user/--pass` (memory only; bare launch = pure toggle-off), `--match` selects both process matching and (first token) the spawn binary resolved via `SearchPathW`.
+- Mid-build user directive: **"remove html serving i don't need & if need will create something for it"** — Kyper's planned dashboard UI and WhisperCast's phone page were both dropped. Both tools are API-only; the HTML-serving parts of `docs/spec-kyper.md` / `docs/spec-whisper-cast.md` are superseded by this decision.
+
+### Design & Implementation
+1. **API surface (final)**: `GET /` → JSON `{port,statusError,status,agents:[{pid,name,path,mode}]}`; `POST /spawn|/steer|/kill` (form-urlencoded) → plain-text status replies (200 ok / 400 err) via `ReplyStatusText`; everything else 404; Basic auth enforced with `WWW-Authenticate: Basic realm="Kyper"`.
+2. **Steering combined (per spec decision)**: hub-spawned agents run with a hub-owned stdin pipe (batch steering via `WriteFile`); externally launched agents get `AttachConsole(pid)` + `WriteConsoleInputW` console injection. Console injection appends a final Enter keypair (VK_RETURN, scan 0x1C, down+up) so the line is actually submitted — verified: injecting `exit` closed an external `cmd /k`; `dir >> %TEMP%\injout.txt` executed and produced the file.
+3. **No `system()` spawns** — all use `CreateProcessW` with arg validation (length ≤ 512, no control chars, workdir must exist).
+4. All HTTP/net plumbing (request parse, urldecode, Basic-auth token, WideToUtf8, LAN IPv4 discovery, replies) came from the new shared header `src/common/tiny_http.h`; CLI parsing/help from `tiny_cli.h`; single-instance toggle from `tiny_ipc.h`.
+
+### Bugs found while verifying
+- **Accepted sockets stayed non-blocking** (`recv` → WSAEWOULDBLOCK 10035): they must be deregistered (`WSAEventSelect(client, NULL, 0)`) **before** `ioctlsocket(FIONBIO, 0)`; the raw ioctl alone is refused for sockets that inherited the listener's event registration.
+- **Accept race**: the working pattern is `WSAEventSelect(FD_ACCEPT)` listener + per-accept-event atomic `WSAEnumNetworkEvents` reset, drain-accept loop, plus a late-accept catch after draining so a backlog entry is never stranded.
+- **Parser lifetime**: `TinyCLI_ParseCommandLine` stores values into its own stack buffer — every string value must be copied to a static buffer before the parser returns (`g_userBuf`/`g_passBuf`/`g_matchBuf`).
+- **Empty logs when redirected**: console servers are CRT-buffered; `setvbuf(stdout, NULL, _IONBF, 0)` makes redirected logs truthful.
+- **Redirect faked a 401**: POST endpoints initially responded with a 303 home redirect; `.NET`'s `Invoke-WebRequest` strips the Authorization header on redirect, producing a false 401. All POST endpoints now reply 200/400 text directly, and `TinyHTTP_ReplyRedirectHome` was deleted from `tiny_http.h`. Another fix folded into the shared header: `TinyHTTP_SendAll` function ordering before the parser (a release-build error).
+
+### Verification (2026-10-26)
+- `pwsh -File .\build.ps1 all` green; `kyper` registered as a canonical build target.
+- PowerShell/curl smoke against the real binary: 401 without creds; JSON on `GET /` (empty agents); `/spawn` → `Spawned agent PID 6772 in C:\Windows (pipe steering).` with agent row `6772:cmd.exe:pipe`; pipe steer → `Sent text to agent 6772.`; kill → `Agent 6772 terminated.`; bogus kill → `400 Cannot open process 424242.`; unknown route → 404; toggle-off exits cleanly and frees the port (only TIME_WAIT sockets remained; one mid-shutdown `LISTENING` row was a transient, gone on re-check).
+
+---
+
+## Cycle: `whisper-cast` — New Tool: LAN Text Typer over mDNS + HTTP + SendInput (2026-10-26)
+
+### Context & Spec
+- New user spec (`docs/spec-whisper-cast.md`): from a phone (or any LAN client), send text that gets typed into whatever window currently has focus on the PC. Name `whisper-cast`, default port 7447, `Global\TinyWhisperCastMutex|Event`, mDNS announce `<name>.local` so no raw IP is needed.
+- API-only per the same user directive above: built-in phone page removed (`GET /` → 404); only `POST /type` with raw UTF-8 body (≤ 2000 wide chars, oversize → 400) remains; the mDNS TXT path record (which had pointed clients at the page) was dropped with it.
+
+### Design & Implementation
+1. **Injection chain**: UTF-8 → UTF-16 (`MultiByteToWideChar`), `SendInput` with `KEYEVENTF_UNICODE` DOWN/UP pairs in 32-pair chunks with `Sleep(2)` between chunks, `\n` → VK_RETURN, `\t` → VK_TAB, and a final line-submit Enter always appended — every POST behaves exactly like a phone keyboard's Send. No focus stealing: the currently focused window receives the keystrokes.
+2. **mDNS responder** (vendored public-domain `src/common/mdns.h`): non-blocking IPv4 socket bound to LAN:5353 (`FIONBIO=1` inside `mdns_socket_setup_ipv4` on Win32), thread loop `mdns_socket_listen` + `Sleep(20)`; A-question answers A + PTR + SRV, PTR-question answers PTR + SRV + A, TTL 60 via `mdns_query_answer_multicast`; service instance `<name>._http._tcp.local`.
+
+### Investigation: the responder "didn't answer" loopback probes
+- First probes received only the probe's own query echoed back via multicast loop. Debug instrumentation (`printf` in `MdnsCallback`) showed the responder **did** parse the query but name matching failed: `mdns_string_extract` produces an **unterminated string with a trailing dot** — one run printed `qname=[whisper-cast.local.??` (dot + garbage bytes from the buffer). This is a real vendored-header gotcha, now noted in `AGENTS.md`; the tool side-steps it with an `ExtractMdnsName` helper (strips the dot, NUL-terminates) used by both callback branches.
+- After the fix, the responder answers and — proof the packet is fully formed — **its own socket receives the looped-back answer** (A record `whisper-cast.local` rlen=4 + additional PTR `_http._tcp.local` and SRV; exactly the designed record set, TTL 60).
+- Same-host probes still cannot see replies on Windows: `IP_MULTICAST_LOOP` delivers looped copies only to the **sending** socket, and `pktmon` capture requires admin. **A real phone on the LAN is the remaining external verification** — recorded as an open item in `docs/CHECKLIST.md`.
+- Debug prints removed after diagnosis; final release re-verified (GET `/` → 404, empty body → `200 OK (empty)`, toggle-off exit 0).
+
+### Trade-offs
+- TXT records dropped with the page: discovery (PTR/SRV) still works, only the "which path" hint is gone — the API docs cover it.
+- One `recvfrom` per poll (non-blocking, `Sleep(20)`): simple and heap-free; a simultaneous query burst could be tail-dropped, acceptable for a desk-side responder.
+- Enter always appended: no way to type without submitting; if a "type without Enter" mode is ever wanted, it becomes a new capability decision rather than a flag default.
+
+
+## 2026-10-26 - Status marking: kyper, whisper-cast, context-menu marked Experimental
+- Per review decision, kyper, whisper-cast, and context-menu are marked Experimental in docs/CHECKLIST.md: kyper & whisper-cast are new (steering/mDNS surfaces under evaluation, real-phone mDNS check outstanding), context-menu's visual editor remains under evaluation.
+
+## 2026-10-26 - kyper gains default mDNS (kyper.local)
+- Follow-up to the status review: kyper was previously IP-reachability-only; per user decision it now announces kyper.local by default, matching the two-tool mDNS convention with whisper-cast.
+- Implementation mirrors whisper-cast exactly: AsciiEquals + ExtractMdnsName (trailing-dot / not-NUL-terminated gotcha) + MdnsCallback answering question names kyper.local (A for first LAN IPv4, additional PTR+SRV) and _http._tcp.local (PTR to kyper._http._tcp.local, SRV with the HTTP port, additional A); dedicated 20 ms poll thread sharing g_running, so toggle-off/Ctrl+C/tray exit join it cleanly before teardown.
+- Fixed identity is a compile-time constant (MDNS_NAME "kyper") - no CLI surface added; user asked for "kyper as default mDNS" and the name matching the binary keeps mental overhead at zero.
+- Smoke tested: banner prints the announce line, mDNS responder active: kyper.local logged, UDP 5353 bound while running (netstat), HTTP JSON status still works with Basic auth, and second bare launch toggles the hub off with exit 0 (mDNS thread joined, no process left).
+- Remaining external check (open item in CHECKLIST): resolve kyper.local from a real phone/second LAN device - same-host multicast loopback limitation applies identically to whisper-cast.
