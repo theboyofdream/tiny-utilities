@@ -27,17 +27,17 @@ Every utility runs as an independent, single-instance executable with instant ho
 
 | Utility | Binary | Type | Description | Docs |
 | :--- | :--- | :--- | :--- | :--- |
-| **Pin to Top** | `pin-to-top.exe` | GUI | Toggles active window topmost status with wallpaper accent-colored border overlay & interactive window picker. | [Details](docs/pin-to-top.md) |
-| **Window Switcher** | `window-switcher.exe` | GUI | Live thumbnail Alt+Tab replacement with unique hint badges for instant 1-key direct window jumping (no visual hunting). | [Details](docs/window-switcher.md) |
-| **Find My Mouse** | `find-my-mouse.exe` | GUI | High-visibility cursor locator with smooth pulse-in / pulse-out animation disc centered on mouse pointer. | [Details](docs/find-my-mouse.md) |
-| **Mouse Spotlight** | `mouse-spotlight.exe` | GUI | Dims desktop for presentations, leaving an anti-aliased spotlight hole on mouse pointer with dynamic resizing. | [Details](docs/mouse-spotlight.md) |
-| **Color Picker** | `color-picker.exe` | GUI | Floating color magnifier & tooltip displaying real-time `HEX`, `RGB`, `HSL`, and `CMYK` with 1-key clipboard copy. | [Details](docs/color-picker.md) |
-| **Screen Capture** | `capture.exe` | GUI | Screenshot & doodle annotation suite with interactive mode picker (Snip, Window, Fullscreen) and drawing canvas. | [Details](docs/capture.md) |
-| **Pixel View** | `pixel-view.exe` | GUI | Frameless image & animated GIF viewer featuring nearest-neighbor chunky pixel block rendering for retro graphics. | [Details](docs/pixel-view.md) |
-| **IP Send** | `ip-send.exe` | GUI | ASCII TUI payload composer with search, message wrapping, and file drag-and-drop. *(Requires [IP Messenger](https://ipmsg.org/en/))* | [Details](docs/ip-send.md) |
-| **Context Menu Manager** *(Preview)* | `context-menu.exe` | GUI / CLI | Cascading Explorer context menu registry utility with recursive submenus and XML backup/update. *(Experimental)* | [Details](docs/context-menu.md) |
-| **OCR Utility** | `ocr.exe` | GUI / CLI | Portable zero-install OCR tool leveraging Tesseract engine with automatic language downloading and clipboard copy. | [Details](docs/ocr.md) |
-| **Command Manager** | `cmdx.ps1` | CLI | PowerShell command dispatcher creating `.cmd`/`.ps1` dual-shims in a dedicated folder registered in User PATH. | [Details](docs/cmdx.md) |
+| **Pin to Top** | `pin-to-top.exe` | GUI | Toggles active window topmost status with wallpaper accent-colored border overlay & interactive window picker. | [Details](docs/tools/pin-to-top.md) |
+| **Window Switcher** | `window-switcher.exe` | GUI | Live thumbnail Alt+Tab replacement with unique hint badges for instant 1-key direct window jumping (no visual hunting). | [Details](docs/tools/window-switcher.md) |
+| **Find My Mouse** | `find-my-mouse.exe` | GUI | High-visibility cursor locator with smooth pulse-in / pulse-out animation disc centered on mouse pointer. | [Details](docs/tools/find-my-mouse.md) |
+| **Mouse Spotlight** | `mouse-spotlight.exe` | GUI | Dims desktop for presentations, leaving an anti-aliased spotlight hole on mouse pointer with dynamic resizing. | [Details](docs/tools/mouse-spotlight.md) |
+| **Color Picker** | `color-picker.exe` | GUI | Floating color magnifier & tooltip displaying real-time `HEX`, `RGB`, `HSL`, and `CMYK` with 1-key clipboard copy. | [Details](docs/tools/color-picker.md) |
+| **Screen Capture** | `capture.exe` | GUI | Screenshot & doodle annotation suite with interactive mode picker (Snip, Window, Fullscreen) and drawing canvas. | [Details](docs/tools/capture.md) |
+| **Pixel View** | `pixel-view.exe` | GUI | Frameless image & animated GIF viewer featuring nearest-neighbor chunky pixel block rendering for retro graphics. | [Details](docs/tools/pixel-view.md) |
+| **IP Send** | `ip-send.exe` | GUI | ASCII TUI payload composer with search, message wrapping, and file drag-and-drop. *(Requires [IP Messenger](https://ipmsg.org/en/))* | [Details](docs/tools/ip-send.md) |
+| **Context Menu Manager** *(Preview)* | `context-menu.exe` | GUI / CLI | Cascading Explorer context menu registry utility with recursive submenus and XML backup/update. *(Experimental)* | [Details](docs/tools/context-menu.md) |
+| **OCR Utility** | `ocr.exe` | GUI / CLI | Portable zero-install OCR tool leveraging Tesseract engine with automatic language downloading and clipboard copy. | [Details](docs/tools/ocr.md) |
+| **Command Manager** | `cmdx.ps1` | CLI | PowerShell command dispatcher creating `.cmd`/`.ps1` dual-shims in a dedicated folder registered in User PATH. | [Details](docs/tools/cmdx.md) |
 
 > [!TIP]
 > *`ip-send` is an independent open-source frontend and is not affiliated with or endorsed by IP Messenger (`ipmsg.org`).*
@@ -55,7 +55,7 @@ Every utility runs as an independent, single-instance executable with instant ho
 
 ## ⌨️ Ready-to-Use Hotkeys (Powered by `shortcuts.ahk`)
 
-The suite includes a ready-to-run AutoHotkey v2 script: [`docs/shortcuts.ahk`](docs/shortcuts.ahk). Double-clicking it in the same directory as the executables instantly activates all shortcuts:
+The suite includes a ready-to-run AutoHotkey v2 script: [`shortcuts.ahk`](shortcuts.ahk). Double-clicking it in the same directory as the executables instantly activates all shortcuts:
 
 | Shortcut | Tool Triggered | What It Does |
 | :--- | :--- | :--- |

@@ -133,3 +133,20 @@ pwsh -File .\build.ps1 [-Mode release|debug] window-switcher
 - **Target Aliases**: `window-switcher`, `switcher`, `win-switch`, `windowswitcher`.
 - **Release Output**: `dist/release/window-switcher.exe`
 - **Debug Output**: `dist/debug/window-switcher.exe`
+
+---
+
+## Verified
+
+- [x] UWP/Chromium names via version metadata + `ApplicationFrameHost` child PID (`Helium→H`)
+- [x] Hints: shortest unique prefix/subsequence, priority candidates, sub-indexing (`C1`)
+- [x] Filter tiers: name/hint prefix > title substring; `WH_KEYBOARD_LL` session hook; Alt-hold pauses timer; `--delay` default 300 ms
+- [x] Alt+Tab races fixed: `IsAltKeyDown`, MRU anchor, default = previous window
+- [x] Accent: registry `AccentPalette` (no sampling drift) or `--accent-color #RRGGBB[AA]`; luminance-aware badge text
+- [x] Sort `name`; `--group` / `dim` / `none` removed
+- [x] `--tint-color #RRGGBBAA`; `--blur` 1–30 Aero light, 31–100 Acrylic
+- [x] `--layout center` (default, no container box) / `full` (columns 3–8); `UI_*` top constants; ~3.0″ cards verified 100–200% DPI
+- [x] Single DIB window; `--stroke-width 0..20` (0 = borderless); letterboxed thumbnails; no font halos; hover `✕` / Shift+Click close keeps switcher open
+- [x] Activation: no `AttachThreadInput`/`SwitchToThisWindow`; maximized preserved (`WPF_RESTORETOMAXIMIZED`); Alt press at activation only (2026-10-01)
+- [x] Startup synthetic Alt key-up removed — Alt-hold bug (2026-10-01)
+- [x] Build clean both modes; toggle smoke OK; `--help`: 19 lines, exit 0 (2026-10-01)

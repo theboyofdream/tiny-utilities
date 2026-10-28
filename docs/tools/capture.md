@@ -7,3 +7,17 @@
 - **Output**: Writes PNG or BMP file and/or places `CF_BITMAP` on the Windows Clipboard with mode-specific filenames (`snip_YYYYMMDD_HHMMSS.<ext>`, `capture_YYYYMMDD_HHMMSS.<ext>`, or `<appname>-<title>_YYYYMMDD_HHMMSS.<ext>`).
 - **IPC Single Instance**: `Global\TinyCaptureMutex` and `Global\TinyCaptureEvent` toggle cancel support.
 
+---
+
+## Verified
+
+- [x] Modes: `--fullscreen`, `--window` (hover picker, DWM bounds, Esc cancel), `--snip` (~49% dark dim) (2026-08-24)
+- [x] `--draw`: translucent desktop backdrop, floating toolbar (`Space` toggles, default hidden), shortcut badges, `--font-size` 8..48 (2026-08-24)
+- [x] Output: `--clipboard` / `--save <file|dir>`; `--format png|bmp`; names `snip_*` / `capture_*` / `<appname>-<title>_*`
+- [x] All modes + output/annotation flags composable
+- [x] One window across all stages (selector → snip/window/annotate), zero flicker (2026-08-25)
+- [x] Selector: centered text group, no card; keys `1/2/3` or `S/W/F`, arrows/Tab, Esc/right-click cancel
+- [x] Save: Enter / Save / `S` opens native dialog when no `--save`; toolbar pill UX, hover glow (2026-08-25)
+- [x] IPC `Global\TinyCaptureMutex/Event` cancels any stage
+- [x] `--help`: 19 lines, exit 0 (2026-10-01); `.\build.ps1 capture` clean
+

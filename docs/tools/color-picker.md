@@ -10,3 +10,14 @@
   - Left-click copies configured output format (or default `HEX`) and exits.
   - Right-click / ESC / second launch toggle cancels cleanly without copying.
 - **Window Styles**: `WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW`, base `WS_POPUP`.
+
+---
+
+## Verified
+
+- [x] Tooltip card: HEX / RGB / HSL / CMYK shown together, 3-column layout under swatch bar
+- [x] Text extents re-measured before `SetWindowPos` — no clipping on any monitor or font size
+- [x] Keys `1`–`4` copy HEX/RGB/HSL/CMYK and exit; bracketless dim labels
+- [x] Left-click = configured format (default HEX); right-click / Esc / toggle cancels
+- [x] CRT string funcs → `wsprintfW`/`lstrlenW`/`lstrcatW` (2026-08-21)
+- [x] `--help`: 11 lines, exit 0 (2026-10-01); `.\build.ps1 color-picker` clean

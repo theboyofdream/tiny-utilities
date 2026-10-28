@@ -12,3 +12,19 @@
 - **Tracking loop** (16 ms): `!IsWindow(target)` → drop entry silently (exits process when `pinnedCount == 0`); `IsIconic` → hide overlay; else compare `GetFrameRect` to `lastRect`, resize/reposition overlay and invalidate for repaint, maintaining topmost Z-order above active target.
 - **Pinned-window lifecycle edge case**: window destroyed while pinned → silently removed (nothing to unpin). Overlay destroyed in every removal path.
 - **Exit path**: loop breaks → unpin all remaining + destroy overlays → close event handle → `return 0`.
+
+---
+
+## Verified
+
+- [x] `--border-width` 1–20 (default 2), `--max-windows` 1–10 (default 1); bad input → default, out of range → clamp (2026-08-13)
+- [x] Defaults as `#define`s; no config files, no env vars
+- [x] IPC `Global\TinyPin2TopMutex/Event`; 2nd launch toggles + exits 0 (2026-08-12; on `tiny_ipc.h` since 2026-09-11)
+- [x] Toggle: pin foreground; FIFO evicts oldest at cap; unpin → overlay destroyed; last unpinned → exit
+- [x] Overlay: layered + transparent + noactivate + toolwindow, `LWA_COLORKEY`; repaint on frame change only (16 ms)
+- [x] Border color: wallpaper accent (`color-thief-algorithm.h`), fallback `#0078D7` (2026-08-13)
+- [x] Frame rect from DWM extended bounds (dynamic `dwmapi`), else `GetWindowRect`; `CS_HREDRAW|CS_VREDRAW` repaint (2026-09-11)
+- [x] Picker: hover pin/unpin, filters cloaked + tool windows, cursor-monitor centered, no `WM_QUIT` on destroy (2026-09-11)
+- [x] WS ≈ 5.8 MiB, private ≈ 1.1 MiB (2026-08-13)
+- [x] `shortcuts.ahk`: `#^t::Run(".\pin-to-top.exe --border-width 2")`
+- [x] `--help`: 13 lines, exit 0 (2026-10-01)

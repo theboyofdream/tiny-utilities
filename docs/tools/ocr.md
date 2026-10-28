@@ -38,3 +38,16 @@
   - `pwsh -File .\build.ps1 ocr` -> `dist/release/ocr.exe` (Windows subsystem `-mwindows`).
   - Libs: `user32, shell32, ole32, urlmon, shlwapi, windowscodecs, gdi32, comdlg32`.
 - **Conventions**: Plain C99, `wWinMain` / `WinMain`, `TinyCLI_Parse`, no services/registry, clean exit.
+
+---
+
+## Verified
+
+- [x] `--image <file> --lang eng|auto --psm 6 --oem 1`; no arg → file picker; cancels exit clean; `--help` 0 / missing file 1 / bad format 2
+- [x] Portable: tesseract + tessdata beside exe; delete folder = uninstall
+- [x] Provisioning: validates >10 KB, downloads ~4 MB zip (`urlmon`→`curl`→`powershell`), no elevation; lazy `tessdata_fast` for hin/tam/tel/osd
+- [x] `--lang auto`: scans models, falls back `eng+hin+tam+tel`
+- [x] Preprocess: WIC 2–3× upscale (`Fant`), grayscale
+- [x] Output: clipboard + stdout + dialog when interactive
+- [x] Build `-mwindows`; libs `user32/shell32/ole32/urlmon/shlwapi/windowscodecs/gdi32/comdlg32` (2026-08-25)
+- [x] `--help`: 14 lines, exit 0 (2026-10-01)

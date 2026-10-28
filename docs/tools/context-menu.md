@@ -138,3 +138,15 @@ pwsh -File .\build.ps1 context-menu
 Output binaries:
 - `dist/release/context-menu.exe`
 - `dist/debug/context-menu.exe`
+
+---
+
+## Verified
+
+- [-] Status: **Preview / Experimental**
+- [x] `--update <xml>` / `--backup <xml>`; bare double-click → Update / Backup / Cancel dialog
+- [x] Native file dialogs + pre-flight XML validation; no confirmation dialogs
+- [x] Nested `<item>` submenus; `command`/`arguments`/`icon`; placeholders `%1`/`%V`
+- [x] `HKCU\Software\Classes`; `ManagedBy = "context-menu"` marker; others untouched; idempotent
+- [x] Bad XML → `stderr` + non-zero exit (CLI) or dialog (GUI)
+- [x] IPC `Global\TinyContextMenuMutex/Event`; `.\build.ps1 context-menu` clean; `--help`: 11 lines, exit 0 (2026-10-01)

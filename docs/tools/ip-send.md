@@ -119,3 +119,26 @@ pwsh -File .\build.ps1 ip-send
 Output executables:
 - `dist/release/ip-send.exe`
 - `dist/debug/ip-send.exe`
+
+---
+
+## Verified
+
+- [x] TUI composer: `#121212` canvas, ASCII hairline box, title `[ SEND VIA IPMSG ]`, accent `#4A90E2`, JetBrains Mono chain (2026-08-21)
+- [x] Layout: `@ name` payloads, `> msg_`, `/ query_`, `> ✓ user` rows; selected row = inverted accent fill; `/` help dialog
+- [x] Resizable, 500×400 default, 8 px edge zones; rows scale 1..16 with height
+- [x] 2nd launch exits idle 1st within ~100 ms (`MsgWaitForMultipleObjects` + pump)
+- [x] Context-menu register/unregister under HKCU `*` / `Directory` / `Background` (+ legacy purge)
+- [x] Input: positional / `--file`, `Ctrl+O`, drag & drop, `Ctrl+V`; paste fix: `CF_HDROP` used directly, text goes to body, one `g_skipNextChar` guard
+- [x] Large paste: heap `StrBuf`; >2048 chars staged via `msgfile=` (verified 20 MB; non-UTF-8 rejected); bounded edit window above 65536 chars — no freeze, no truncation
+- [x] `Insert` = edit mode; word wrap + auto-height; `Space` toggles selection; names containing `i` safe
+- [x] `r` refresh preserves selection (UID/name/IP match, cursor stays put); deselect-offline allowed (2026-09-11)
+- [x] Send refuses nothing-to-send / vanished attachments; success only if `CreateProcessW` succeeded
+- [x] Backend: `ipmsg.exe` only (ipcmd = false positives); missing → dialog; auto-start with warning; cmdline cap 32768
+- [x] Cursor-monitor centering; light theme `Ctrl+D`; send-button/resize/toast fixes (2026-09-04)
+- [x] Native EDIT box: multiline, `Ctrl+Backspace`, dynamic height, `Insert`-only entry (2026-09-07)
+- [x] `--to/--message/--file/--send`; `--to` survives refresh, matches IP (2026-09-11)
+- [x] IPC `Global\TinyIPSendMutex/Event`; Explorer multi-select forwards args via `WM_COPYDATA`
+- [x] `--help`: 17 lines, exit 0 (2026-10-01)
+- [ ] 2026-10-17: unusable rewrite reverted to `src/ip-send.c.bak` (hash-verified); discarded copy in `src/ip-send.c.rewrite`
+

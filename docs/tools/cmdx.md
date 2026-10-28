@@ -55,3 +55,12 @@ qwen "Hello"
 zw
 refreshenv
 ```
+
+---
+
+## Verified
+
+- [x] Registry + dual shims (`.cmd`/`.ps1`) in `cmds/`; dispatch live-edits with `src/cmdx.ps1`, no regeneration
+- [x] `HKCU\Environment\Path` + `WM_SETTINGCHANGE` + in-session `$env:Path` refresh
+- [x] Regex keys expand to `$1`/`$2` alias names
+- [x] `setup` / `clean` / `help` (also bare launch)

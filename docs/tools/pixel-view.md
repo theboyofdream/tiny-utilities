@@ -28,3 +28,16 @@
   - Close
 - **IPC Contract**: `Global\TinyPixelViewMutex` and `Global\TinyPixelViewEvent` single instance double-launch toggle support.
 - **Build**: `pwsh -File .\build.ps1 pixel-view` (outputs `dist/release/pixel-view.exe`).
+
+---
+
+## Verified
+
+- [x] Native Win32 frameless overlay; WIC decodes PNG/JPG/BMP/GIF (disposals, offsets, delays)
+- [x] Constant pixel scale (default 2 px), nearest-neighbor only; resizing reveals more detail at 1:1
+- [x] Opens 400 px wide, aspect-preserved, kept across resizes
+- [x] Backgrounds: pixelated gradient (default), linear, solid, transparent
+- [x] Drag = `HTCAPTION`; resizable; right menu: open (`Ctrl+O`), bg, scale 1/2/3/4/8, close
+- [x] CLI `--file` (positional ok, `--pixel-size`, `--ratio`, `--bg`, `--grid`); IPC toggle mutex/event
+- [x] 174.5 → 144.0 KB (`wsprintfW`/`lstrlenW`/`lstrcatW`, 2026-08-21)
+- [x] `--help`: 14 lines, exit 0 (2026-10-01); `.\build.ps1 pixel-view` clean

@@ -315,7 +315,7 @@ function Package-Artifacts([string]$BuildMode, [string]$BuildArch = 'x64') {
     Get-ChildItem -Path $srcDir -Filter "*.exe" | ForEach-Object {
         Copy-Item $_.FullName "$bundleDir\$($_.Name)" -Force
     }
-    $shortcuts = Join-Path (Join-Path $ROOT 'docs') 'shortcuts.ahk'
+    $shortcuts = Join-Path $ROOT 'shortcuts.ahk'
     if (Test-Path $shortcuts) {
         Copy-Item $shortcuts "$bundleDir\shortcuts.ahk" -Force
     }

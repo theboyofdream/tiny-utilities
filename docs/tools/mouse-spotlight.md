@@ -26,3 +26,15 @@ Native Win32 presentation overlay tool that dims the screen except for a customi
   - Pure Win32 C99, compiled with Clang (`clang` MinGW or `clang-cl` MSVC).
   - Uses shared common headers: `tiny_cli.h`, `tiny_ipc.h`, `tiny_dpi.h`, `tiny_gui.h`.
   - Links standard Win32 libraries: `user32`, `gdi32`.
+
+---
+
+## Verified
+
+- [x] 60 FPS tracking (16 ms); spotlight follows the cursor
+- [x] `--size`/`-s` 20..1000 (default 150); `--dim`/`-d` 0–100 % or 0–255 alpha (default 65 %)
+- [x] `Ctrl +/-/0` enlarge/shrink/reset; key or click exits after 250 ms grace (find-my-mouse convention)
+- [x] DPI-aware radius via `TinyDPI_GetDpiForPoint`
+- [x] `UpdateLayeredWindow` per-pixel alpha over virtual desktop; partial clears; 6 px AA edge; no `SetWindowRgn`
+- [x] Click-through; IPC `Global\TinyMouseSpotlightMutex/Event`
+- [x] Build clean both modes; `--help`: 11 lines, exit 0 (2026-10-01)

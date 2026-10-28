@@ -20,3 +20,11 @@ Interacting with the Windows Clipboard (`OpenClipboard`) can occasionally fail i
   Checks if `CF_UNICODETEXT` or `CF_TEXT` is present on the clipboard.
 - `bool TinyClipboard_HasFiles(void)`
   Checks if `CF_HDROP` (file drop list) is present on the clipboard.
+
+---
+
+## Verified
+
+- [x] Header-only (`static inline`); `.c` files deleted (2026-08-25)
+- [x] `SetText` (`CF_UNICODETEXT`, retry + lock-safe — the `OpenWithRetry` pattern)
+- [x] `GetText` / `GetTextAlloc` / `HasText`; `SetBitmap` (`CF_BITMAP`); `HasFiles` (`CF_HDROP`)

@@ -64,3 +64,14 @@ Header-only font management, fallback chains, centralized typography metrics, da
   Constructs a monospace font (`JetBrains Mono` / fallback chain) with `FIXED_PITCH | FF_MODERN`.
 - `HFONT TinyFont_CreateUI(int fontSize, int weight, UINT dpi)`
   Constructs a UI font (`Segoe UI` / fallback chain) with `VARIABLE_PITCH | FF_SWISS`.
+
+---
+
+## Verified
+
+- [x] Header-only (`static inline`); `.c` files deleted (2026-08-25)
+- [x] `TinyFont_ScaleSize` = `MulDiv(fontSize, dpi, 96)` — same physical size on any DPI
+- [x] OS default size via `SPI_GETNONCLIENTMETRICS`
+- [x] Zoom keys `Ctrl +/-/0`, clamped 8..48(px)
+- [x] `pointSize` → `fontSize`; sizes/weights/colors centralized in the header
+- [x] `MeasureText` / `GetFontHeight` helpers; re-created on `WM_DPICHANGED` (window-switcher)

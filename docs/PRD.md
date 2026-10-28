@@ -5,17 +5,41 @@
 
 # 0. Purpose
 
-This document defines **fully deterministic behavior** for two Windows utilities:
+This document defines the **global deterministic contract** for the `tiny-utilities` Windows tools: the hard rules, the compiler requirement, the IPC toggle contract, and the regime of granted exceptions (§21).
 
-1. **Pin2Top** — toggle topmost state + border overlay for the active window
-2. **CursorFocus** — toggle cursor highlight overlay
-
-This version adds:
-
-* ✅ **Command-line arguments support (Pin2Top only)**
+* ✅ **Command-line arguments support with deterministic parsing**
 * ✅ **Clang as the required compiler (NOT GCC)**
 * ✅ Strict Win32 C implementation rules
 * ✅ Fully deterministic agent instructions
+
+---
+
+# 0.1 HOW TO READ THIS REPO
+
+Ownership is layered by fact type — each fact lives in exactly one place:
+
+- **Global contract** (this file, §1–§13 + §21): hard rules, compiler, IPC toggle, overlay/perf contract, carve-out registry.
+- **Per-tool truth**: `docs/tools/<tool>.md` holds each tool's behavior spec, CLI reference **and its "Verified" section** (implementation status). One doc per `src/<tool>.c`.
+- **Shared headers**: `docs/common/<header>.md`, one per `src/common/<header>.h`.
+- **Cross-cutting status**: `docs/CHECKLIST.md` (hard-rule compliance, build/release pipeline only).
+- **Design principles / taste**: `docs/PRINCIPLES.md`. **Decision history (append-only)**: `docs/JOURNEY.md`.
+
+| Tool | Spec |
+|---|---|
+| pin-to-top | `docs/tools/pin-to-top.md` |
+| find-my-mouse | `docs/tools/find-my-mouse.md` |
+| mouse-spotlight | `docs/tools/mouse-spotlight.md` |
+| color-picker | `docs/tools/color-picker.md` |
+| capture | `docs/tools/capture.md` |
+| pixel-view | `docs/tools/pixel-view.md` |
+| ip-send | `docs/tools/ip-send.md` |
+| context-menu | `docs/tools/context-menu.md` |
+| ocr | `docs/tools/ocr.md` |
+| window-switcher | `docs/tools/window-switcher.md` |
+| mwb (win32 + macOS peer) | `docs/tools/mwb.md` |
+| kyper | `docs/tools/kyper.md` |
+| whisper-cast | `docs/tools/whisper-cast.md` |
+| cmdx (script tool) | `docs/tools/cmdx.md` |
 
 ---
 
@@ -36,6 +60,8 @@ Agents MUST follow all rules:
 - Must exit cleanly on toggle-off
 - Must compile with Clang (MSVC-compatible or MinGW-clang)
 ```
+
+Exceptions exist **only** where granted explicitly in the §21 carve-out registry. An unlisted exception is a spec violation.
 
 ---
 
@@ -61,140 +87,30 @@ clang (LLVM)
 
 ---
 
-## 2.2 BUILD COMMANDS (CLANG)
+## 2.2 BUILD COMMAND
 
-### Option A — clang-cl
-
-```bash
-clang-cl pin.c user32.lib gdi32.lib -O2 -o pin.exe
-clang-cl cursor.c user32.lib gdi32.lib -O2 -o cursor.exe
-```
-
-### Option B — clang (MinGW style)
+One declarative entry point; only the changed target is rebuilt:
 
 ```bash
-clang pin.c -o pin.exe -O2 -mwindows -luser32 -lgdi32
-clang cursor.c -o cursor.exe -O2 -mwindows -luser32 -lgdi32
+pwsh -File .\build.ps1 [-Mode release|debug] <target|all>
 ```
+
+Output goes to `dist/release/` or `dist/debug/`.
 
 ---
 
-# 3. CLI ARGUMENT SYSTEM (PIN2TOP ONLY)
+# 3. CLI ARGUMENT RULES (GLOBAL)
 
-## 3.1 Overview
-
-Pin2Top now supports optional arguments:
+Full per-tool flag references live in each `docs/tools/<tool>.md`. The global contract:
 
 ```text
-pin.exe [--border-width N] [--max-windows N]
+- Arguments are optional; missing → defaults
+- Missing values / unknown flags / non-integers → fallback to defaults
+- Out-of-range values → clamp (never fail)
+- No config files, no environment variables
 ```
 
----
-
-## 3.2 ARGUMENT RULES
-
-```text
-- Arguments are optional
-- If missing → use defaults
-- Invalid values → fallback to defaults
-- No config files
-- No environment variables
-```
-
----
-
-## 3.3 SUPPORTED FLAGS
-
-### 1. Border Width
-
-```text
---border-width N
-```
-
-#### Meaning:
-
-Sets overlay border thickness in pixels.
-
-#### Constraints:
-
-```text
-1 <= N <= 20
-default = 2
-```
-
-#### Example:
-
-```bash
-pin.exe --border-width 5
-```
-
----
-
-### 2. Max Windows
-
-```text
---max-windows N
-```
-
-#### Meaning:
-
-Maximum number of simultaneously pinned windows allowed.
-
-#### Constraints:
-
-```text
-1 <= N <= 10
-default = 1
-```
-
-#### Behavior:
-
-If limit reached:
-
-```text
-- ignore new pin request
-- keep existing pinned windows unchanged
-```
-
----
-
-## 3.4 ARG PARSING RULES
-
-Use deterministic parsing:
-
-```c
-for each argv:
-    if "--border-width":
-        parse next int
-    if "--max-windows":
-        parse next int
-```
-
-Invalid cases:
-
-```text
-missing value → ignore flag
-non-integer → ignore flag
-out of range → clamp or ignore
-```
-
----
-
-## 3.5 INTERNAL CONFIG STRUCT
-
-```c
-typedef struct {
-    int borderWidth;
-    int maxWindows;
-} Config;
-```
-
-Defaults:
-
-```c
-borderWidth = 2;
-maxWindows = 1;
-```
+Parsing is declarative via `TinyCLI_ParseCommandLine` / `TinyCLI_Parse` (`src/common/tiny_cli.h`): each utility defines its `CliOption` options table **once**, reused for both argument parsing and `--help` / `-h` / `/?` output (dual-mode output: redirected stdout → parent console → `MessageBoxW`).
 
 ---
 
@@ -203,224 +119,39 @@ maxWindows = 1;
 ## 4.1 Execution Model
 
 ```text
-AHK hotkey → exe → toggle → exit OR stay active
+AHK hotkey (shortcuts.ahk) → exe → toggle → exit OR stay active
 ```
 
 No daemon processes.
 
 ---
 
-## 4.2 STATE MODEL
-
-### Pin2Top
-
-```c
-struct State {
-    HWND target;
-    bool isPinned;
-    RECT lastRect;
-    Config config;
-}
-```
-
-### CursorFocus
-
-```c
-bool isActive;
-```
-
----
-
-# 5. IPC CONTRACT (STRICT)
+# 5. IPC TOGGLE CONTRACT (STRICT, ALL TOOLS)
 
 ## 5.1 Named Objects
 
-### Pin2Top
-
 ```text
-Mutex: Global\TinyPin2TopMutex
-Event: Global\TinyPin2TopEvent
+Mutex: Global\Tiny<Tool>Mutex
+Event: Global\Tiny<Tool>Event   (manual-reset = FALSE)
 ```
-
-### CursorFocus
-
-```text
-Mutex: Global\TinyCursorFocusMutex
-Event: Global\TinyCursorFocusEvent
-```
-
----
 
 ## 5.2 IPC RULES
 
 ```text
-- Mutex exists → send event → exit
-- Mutex not exists → create instance
+- First launch creates both, then runs
+- Second launch sees ERROR_ALREADY_EXISTS → SetEvent → exit 0
 - Event = TOGGLE only
 ```
 
 ---
 
-# 6. PIN2TOP — SPECIFICATION
+# 6. & 7. PER-TOOL BEHAVIOR
+
+Per-tool behavior (launch flows, toggle logic, overlay animation, tracking loops, edge cases) is specified **and verified** in each tool's own doc — see the table in §0.1. The docs tools mirror `src/` and are the single owner of tool truth; this PRD does not duplicate them.
 
 ---
 
-## 6.1 Behavior Summary
-
-```text
-Win + Ctrl + T → toggle pin for active window
-```
-
----
-
-## 6.2 FIRST LAUNCH FLOW
-
-```text
-pin.exe [args]
-    ↓
-parse CLI args → Config
-    ↓
-GetForegroundWindow()
-    ↓
-CreateMutex (success → new instance)
-    ↓
-pin window
-    ↓
-create overlay (borderWidth from config)
-    ↓
-enter loop
-```
-
----
-
-## 6.3 SECOND LAUNCH FLOW
-
-```text
-pin.exe [args]
-    ↓
-Mutex exists
-    ↓
-SendEvent(TOGGLE)
-    ↓
-exit immediately
-```
-
----
-
-## 6.4 TOGGLE LOGIC (RUNNING PROCESS)
-
-```text
-on EVENT:
-    if isPinned == false:
-        if pinnedWindowCount < maxWindows:
-            pin window
-            create overlay (borderWidth)
-            isPinned = true
-        else:
-            ignore request
-    else:
-        unpin window
-        destroy overlay
-        exit process
-```
-
----
-
-## 6.5 WINDOW PIN RULES
-
-```c
-SetWindowPos(hwnd, HWND_TOPMOST, 0,0,0,0,
-             SWP_NOMOVE | SWP_NOSIZE);
-```
-
-Unpin:
-
-```c
-SetWindowPos(hwnd, HWND_NOTOPMOST, 0,0,0,0,
-             SWP_NOMOVE | SWP_NOSIZE);
-```
-
----
-
-## 6.6 OVERLAY RULES
-
-Border width is dynamic:
-
-```text
-borderWidth = Config.borderWidth
-```
-
-Overlay must:
-
-```text
-- match window rect
-- draw borderWidth px border
-- remain click-through
-```
-
----
-
-## 6.7 TRACKING LOOP
-
-```text
-every 16ms:
-    if !IsWindow(target):
-        exit
-
-    if IsIconic(target):
-        hide overlay
-        continue
-
-    RECT r = GetWindowRect(target)
-
-    if r changed:
-        move overlay
-```
-
----
-
-# 7. CURSORFOCUS — SPECIFICATION
-
----
-
-## 7.1 Behavior
-
-```text
-Win + Ctrl + C → toggle cursor highlight
-```
-
----
-
-## 7.2 FIRST LAUNCH
-
-```text
-create mutex
-create overlay
-loop
-```
-
----
-
-## 7.3 SECOND LAUNCH
-
-```text
-send event → exit
-```
-
----
-
-## 7.4 LOOP
-
-```text
-GetCursorPos()
-move overlay center
-```
-
----
-
-# 8. OVERLAY SYSTEM (SHARED)
-
----
+# 8. OVERLAY SYSTEM (SHARED CONTRACT)
 
 ## 8.1 WINDOW STYLE
 
@@ -431,16 +162,13 @@ WS_EX_NOACTIVATE
 WS_EX_TOOLWINDOW
 ```
 
+Per-tool transparency technique (color-key vs uniform-alpha + per-pixel DIB) is documented in each tool doc.
+
 ---
 
 ## 8.2 RENDERING
 
-GDI ONLY:
-
-* Rectangle border (Pin2Top)
-* Circle highlight (CursorFocus)
-
-No DirectX.
+GDI ONLY. No DirectX.
 
 ---
 
@@ -471,59 +199,27 @@ Memory < 10MB per tool
 Loop ≤ 60Hz
 ```
 
+Measured values are recorded per tool doc.
+
 ---
 
 # 11. AUTOHOTKEY CONTRACT
 
+Hotkey wiring lives in `shortcuts.ahk` (repo root); example shape:
+
 ```ahk
-#^t::Run("pin.exe --border-width 3 --max-windows 2")
-#^c::Run("cursor.exe")
+#^t::Run(".\pin-to-top.exe --border-width 2")
 ```
 
 ---
 
-# 12. FINAL STATE MACHINES
+# 12. STATE MACHINES
 
----
-
-## 12.1 PIN2TOP FSM
-
-```text
-START
-  ↓
-parse args → Config
-  ↓
-GetForegroundWindow
-  ↓
-Mutex exists?
-   ├── NO → CREATE + PIN + LOOP
-   └── YES → SEND EVENT → EXIT
-```
-
-Inside process:
-
-```text
-EVENT:
-   if pinned:
-       UNPIN + EXIT
-   else:
-       if maxWindows not exceeded:
-           PIN + SHOW OVERLAY
-       else:
-           IGNORE
-```
-
----
-
-## 12.2 CURSOR FSM
-
-UNCHANGED
+Per-tool launch/toggle state machines are documented in each tool doc (they supersede any historical FSM text in old PRD revisions).
 
 ---
 
 # 13. FINAL GUARANTEE
-
-This version guarantees:
 
 * deterministic CLI parsing
 * clang-only build compatibility
@@ -531,35 +227,31 @@ This version guarantees:
 * no undefined IPC behavior
 * no hidden state
 * predictable overlay behavior
-* safe multi-window limit enforcement
 
 ---
 
-# 20. GLOBAL-CMD SPECIFICATION
+# 20. GLOBAL-CMD — SUPERSEDED
 
-* **Type:** Tiny native CLI executable (`global-cmd.exe`).
-* **Input:** `--dest <folder-path>` (also `--dist`, `--destination`, `-d`) and `--config <config.json>` (also `-c`).
-* **Behavior:**
-  - Validates and creates destination directory if missing.
-  - Ensures destination directory is present in User PATH (`HKCU\Environment`, `Path`), broadcasting `WM_SETTINGCHANGE`.
-  - Loads and parses JSON configuration with regex keys and command templates (`cmd` and `ps1`).
-  - Expands regex capture groups `(group1|group2)` into candidate alias names (`$1`, `$2`, etc.).
-  - Resolves wildcard `*` components in target paths against disk directories (e.g. `v16*` -> `v16.20.2`).
-  - Probes target executable files on disk and automatically corrects extensions (e.g. `.cmd` -> `.exe` when target is a native binary).
-  - Generates `<name>.cmd` and `<name>.ps1` alias wrappers directly in `--dest`.
-  - Prints compact CLI output with `✓` and `x` indicators.
+`src/global-cmd.c` was removed 2026-09-04 and superseded by the dynamic PowerShell script tool `src/cmdx.ps1` (`docs/tools/cmdx.md`), which owns the PATH registration and alias-shim behavior.
 
 ---
 
-# 21. MWB SPECIFICATION (LAN MOUSE-WITHOUT-BORDERS PEER, WIN32 <-> MACOS)
+# 21. CARVE-OUT REGISTRY (EXCEPTIONS TO §1)
 
-* **Type:** Tray utility for two peers on one LAN; binary `mwb.exe` (win32) and `mwb-mac` (macOS, built Mac-side via `build_mac.sh`). Full spec: `docs/mwb.md`.
-* **Modes:** `server` (physical console; captures and shares input) and `client` (receives and injects). Roles are fixed per session; single instance per machine via `Global\TinyMwbMutex` / `Global\TinyMwbEvent` — a second launch cleanly stops the first.
-* **CLI:** `mwb [server|client [ip]] [--otp CODE] [--log FILE] [--help]`; pairing via 4-char caps-free OTP (alphabet without 0/O/1/I) with HMAC-SHA256 proofs (`'C'/'S'/'K'`) and file-channel auth (`'F'`). Session payload is **not encrypted** — trusted LANs only.
-* **Tunnel-side model:** the server names its handover edge (win32 tray submenu "Peer is on...", macOS `--side`); the client mirrors entry/exit automatically via `M_ENTER`/`M_LEAVE` fields. Session-only, default Right.
-* **Data channels:** UDP 24800 discovery (`MWB1` beacons), TCP 24801 input + clipboard, TCP 24802 files (`MWF1` push / `MWP1` lazy pull, generation-based offers). Keys on the wire are always Win32 VK codes.
+Every deviation from the hard rules is registered here — granted explicitly, scoped narrowly. An exception not listed below is a spec violation.
 
-### Carve-outs granted to MWB (exceptions to Section 1)
+| Tool | Granted exception | Scope |
+|---|---|---|
+| `context-menu` | Registry writes | Per-user Explorer menus under `HKCU\Software\Classes`; managed keys marked `ManagedBy = "context-menu"`; non-managed entries untouched |
+| `ip-send` | Registry + native composer window + third-party process | HKCU context-menu registration (`*`, `Directory`, `Directory\Background`) + App Paths lookup for backend detection; one resizable composer window (not an overlay); auto-starts the `ipmsg.exe` background process with a visible warning |
+| `pixel-view` | Native viewer window | One resizable main viewer window (not an overlay); zero web runtimes |
+| `cmdx` (script tool) | User PATH | `HKCU\Environment` `Path` registration with `WM_SETTINGCHANGE` broadcast |
+| `ocr` | Disk provisioning + dialogs | Downloads portable Tesseract + `tessdata` beside the exe on first run (user-managed folder; delete = uninstall); native file-picker and message dialogs |
+| `mwb` | Full §21.1 grant below | Low-level hooks (server mode), tray + native dialogs, log file + received-files folder, long-running tray process, optional read-only config |
+| `kyper` | Resident + network + child processes | Long-running console server until toggle-off; TCP listener on `0.0.0.0:<port>` (HTTP Basic auth); spawns and steers child agent processes |
+| `whisper-cast` | Resident + network + input injection | Long-running console server; TCP listener; `SendInput` keystroke injection into the currently focused window (no focus stealing) |
+
+### 21.1 mwb (full grant)
 
 ```text
 - Global system hooks ARE permitted in SERVER mode only (WH_MOUSE_LL / WH_KEYBOARD_LL are
@@ -570,11 +262,14 @@ This version guarantees:
   pairing codes, paths or flags are ever saved BY the tool; runtime settings remain
   session-only. EXCEPTION - an optional READ-ONLY config file may be READ at startup:
   default `mwb.txt` beside the exe/binary, or `--config PATH`; keys
-  `mode = server|client`, `side = right|left|up|down`, `clipboard = on|off`;
+  `mode = server|client`, `side = right|left|up|down`, plus channel keys
+  `clipboard`/`mouse`/`keyboard`/`files = on|off`;
   '#' comments; unknown keys logged and ignored; CLI arguments always win;
   the tool never writes to the file.
 - Long-running process: stays resident in the tray until toggle-off (second launch) or Exit.
 ```
+
+Full behavior spec: `docs/tools/mwb.md`.
 
 ---
 

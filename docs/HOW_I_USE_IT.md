@@ -20,29 +20,29 @@ Modern desktop utilities are often bloated:
 
 ## ⌨️ The Hotkey Map (Powered by `shortcuts.ahk`)
 
-All utilities are wired together via the included [`docs/shortcuts.ahk`](shortcuts.ahk) (AutoHotkey v2) script. Here is the daily workflow:
+All utilities are wired together via the included [`shortcuts.ahk`](../shortcuts.ahk) (AutoHotkey v2) script. Here is the daily workflow:
 
 ```
-┌────────────────────────────────────────────────────────────────────────┐
-│                        DAILY WORKFLOW HOTKEYS                          │
-├───────────────────────┬───────────────────┬────────────────────────────┤
-│ Shortcut              │ Tool Triggered    │ Workflow Action            │
-├───────────────────────┼───────────────────┼────────────────────────────┤
-│ Alt + Tab             │ window-switcher   │ Instant live Alt+Tab with  │
-│                       │                   │ thumbnail hint jumping     │
-│ Double Tap Ctrl       │ mouse-spotlight   │ Spotlight cursor & dim     │
-│                       │                   │ background (find + meet)   │
-│ Win + Ctrl + T        │ pin-to-top        │ Pin/unpin active window    │
-│ Win + Ctrl + O        │ capture + ocr     │ Snip screen -> Auto OCR -> │
-│                       │                   │ Copied to clipboard        │
-│ Win + Ctrl + C        │ color-picker      │ Magnify pixel & copy color │
-│ PrintScreen           │ capture           │ Fullscreen capture & draw  │
-│ Alt + PrintScreen     │ capture           │ Active window snip & draw  │
-│ Ctrl + PrintScreen    │ capture           │ Region snip & draw         │
+┌──────────────────────────────────────────────────────────────────────────┐
+│                        DAILY WORKFLOW HOTKEYS                            │
+├───────────────────────┬───────────────────┬──────────────────────────────┤
+│ Shortcut              │ Tool Triggered    │ Workflow Action              │
+├───────────────────────┼───────────────────┼──────────────────────────────┤
+│ Alt + Tab             │ window-switcher   │ Instant live Alt+Tab with    │
+│                       │                   │ thumbnail hint jumping       │
+│ Double Tap Ctrl       │ mouse-spotlight   │ Spotlight cursor & dim       │
+│                       │                   │ background (find + meet)     │
+│ Win + Ctrl + T        │ pin-to-top        │ Pin/unpin active window      │
+│ Win + Ctrl + O        │ capture + ocr     │ Snip screen -> Auto OCR ->   │
+│                       │                   │ Copied to clipboard          │
+│ Win + Ctrl + C        │ color-picker      │ Magnify pixel & copy color   │
+│ PrintScreen           │ capture           │ Fullscreen capture & draw    │
+│ Alt + PrintScreen     │ capture           │ Active window snip & draw    │
+│ Ctrl + PrintScreen    │ capture           │ Region snip & draw           │
 │ Alt + I               │ ip-send           │ LAN messenger *(needs IPMsg)*│
-│ F12                   │ (Built-in AHK)    │ Hide / Show Desktop Icons  │
-│ Alt + J / Alt + L     │ (Built-in AHK)    │ Home / End navigation      │
-└───────────────────────┴───────────────────┴────────────────────────────┘
+│ F12                   │ (Built-in AHK)    │ Hide / Show Desktop Icons    │
+│ Alt + J / Alt + L     │ (Built-in AHK)    │ Home / End navigation        │
+└───────────────────────┴───────────────────┴──────────────────────────────┘
 ```
 
 ---

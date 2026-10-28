@@ -5,7 +5,7 @@ in the style of Mouse Without Borders. One physical console controls both machin
 
 ## 1. Overview & Core Contract
 
-- **Source Files**: [`src/mwb.c`](../src/mwb.c) (win32) and [`src/mwb_mac.c`](../src/mwb_mac.c) (macOS peer, identical wire protocol).
+- **Source Files**: [`src/mwb.c`](../../src/mwb.c) (win32) and [`src/mwb_mac.c`](../../src/mwb_mac.c) (macOS peer, identical wire protocol).
 - **Binary Targets**: `dist/release/mwb.exe` / `dist/debug/mwb.exe` (via `pwsh -File .\build.ps1 mwb`); macOS: `./build_mac.sh` -> `./mwb-mac` (Mac required; never compiled on Windows).
 - **Subsystem**: `windows` (`WinMain`); attaches to the parent console for log output when started from a terminal.
 - **Language**: strict Win32 C (Winsock2, GDI, OLE only for cross-machine drag-and-drop), Clang-only build.
@@ -67,7 +67,7 @@ files     = on              # on | off (file offers, pulls, cross-PC drag)
   - `keyboard = off` on the controller ⇒ keys are **parked** while the cursor is remote (swallowed, not typed into either machine); the Scroll Lock (win) / double-Caps-Lock (mac) emergency return still works — it is control-plane, not a channel.
   - `files = off` ⇒ no automatic file offers, no cross-machine drag, and the tray "Send file" action is skipped. `clipboard = off` + `files = on` is valid: file-sync without text sync.
 - There is deliberately **no `otp` key**: the pairing code rotates at runtime and a permanent shared-secret in a file buys nothing.
-- Parser is the shared loader [`src/common/tiny_config.h`](../src/common/tiny_config.h) (`TinyConfig_Load`) — the same code runs on the win32 and macOS peers.
+- Parser is the shared loader [`src/common/tiny_config.h`](../../src/common/tiny_config.h) (`TinyConfig_Load`) — the same code runs on the win32 and macOS peers.
 
 ## 3. Single Instance & IPC Toggle
 
@@ -164,4 +164,20 @@ macOS-specific:
 
 - `pwsh -File .\build.ps1 -Mode release mwb` (Clang, `ws2_32 user32 gdi32 shell32 comdlg32 ole32 uuid bcrypt`).
 - Smoke: first launch binds/starts; second launch signals toggle and exits 0; first instance stops cleanly (0 processes remain).
-- Session behaviors (edge crossing, pairing, clipboard/files) are exercised between two machines; see CHECKLIST entries for the tested matrix and the open mac hardware list.
+- Session behaviors (edge crossing, pairing, clipboard/files) are exercised between two machines; the tested matrix and open items are below (kept from `CHECKLIST.md` history).
+
+### Repository validation & fix log (2026-10-17, moved from `CHECKLIST.md`)
+
+- [x] Validated against Microsoft docs (clipboard transfer, layered hit-testing, LL-hook contract, keepalives)
+- [x] 1-byte heap overflow fixed (`offer_serialize`, `total + 1` alloc)
+- [x] Hook hardened: re-park after remote move, swallow first move after edge-cross, `TryEnterCriticalSection` for `M_MOVE` (contended deltas dropped)
+- [x] Send race fixed (`g_sock` under `g_send_lock`); keepalive 5 s/1 s + 30 s timeouts; file-name caps aligned (1024/255); stuck buttons released on `M_LEAVE`/back-cross/disconnect
+- [x] `build.ps1 mwb` target; `-Wall -Wextra` clean; smoke: binds 24801, beacons 24800, 2nd instance toggles off
+- [x] macOS peer `src/mwb_mac.c`: `CGEventTap`/`CGEventPost`, CoreFoundation Pasteboard, `HMAC-SHA256`; VK = wire code (`kVK ↔ VK` table); received files → `~/mwb-received` → pasteboard URLs; `--side`; Caps×2 return; `flock` instance; Accessibility permission; build via `build_mac.sh` on a Mac
+- [x] Tunnel sides: server names its edge (tray / `--side`), client mirrors via `M_ENTER`/`M_LEAVE`
+- [x] Re-read fixes: `kVK_ANSI_*` keycodes, `offer_publish` ownership, ClipWatch harvest, wire offer gen, `CFSTR` scope, Win-flag in `inj_key`, stuck modifiers, display origins, `MSG_NOSIGNAL`/`SO_NOSIGPIPE`
+- [x] Formalized as repo tool: spec + PRD §21 carve-outs + AGENTS.md; migrated to shared headers (`TinyCLI` help, `TinyIPC` — 2nd launch now STOPS the instance, MsgWait loop, DPI device pixels)
+- [x] Read-only `mwb.txt` / `--config` via `tiny_config.h`: `mode`/`side`/`clipboard`/`mouse`/`keyboard`/`files`; CLI wins, unknown keys logged, never written; macOS parser identical; bare mac launch prints usage
+- [x] Verified: "3 key(s) applied" + 2 warnings, per-channel hook gating, toggle-offs leave 0 processes
+- [ ] Hardware test (Mac + PC): pairing, text/files both ways, all four sides, Caps×2 return
+- [ ] Live win↔win session matrix; `HOW_I_USE_IT.md` mention

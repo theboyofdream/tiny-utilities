@@ -17,3 +17,19 @@
 - **Loop** (16 ms): pump messages; `GetCursorPos`; move glow center only when cursor position changes.
 - **Dismissal**: mouse click or key press starts focus-out fade and process exits (detected via `GetAsyncKeyState` over VK 1–254 with 250 ms grace period `ACTIVATE_GRACE_MS`).
 - `TinyDPI_EnablePerMonitorAwareness()` ensures overlay coordinates match physical pixels 1:1.
+
+---
+
+## Verified
+
+- [x] IPC `Global\TinyCursorFocusMutex/Event`; 2nd launch toggles + exits 0 (2026-08-12)
+- [x] Launch: mutex → event → dim+glow → loop; deactivate → destroy → exit
+- [x] 16 ms loop; move glow only on cursor change
+- [x] Layers: uniform-alpha dim (160) + per-pixel DIB spot (r 100, alpha 160)
+- [x] Anim: focus-in 400 ms ease-in → steady; focus-out 350 ms ease-out → exit (2026-08-12)
+- [x] Any click/key exits after 250 ms grace (`GetAsyncKeyState`, no hook)
+- [x] GDI only; WS ≈ 7.3 MiB, private ≈ 1.6 MiB (2026-08-13)
+- [x] DPI: radius `MulDiv(BASE_SPOT_RADIUS, dpi, 96)` ≈ 40 mm on any display; rescale at DPI change (2026-08-25)
+- [x] `--help`: 9 lines, exit 0 (2026-10-01)
+- [ ] CPU idle not re-measured (event-wait, expected < 0.2%)
+- [ ] Visual click-through check in a real session
