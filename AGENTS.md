@@ -2,7 +2,7 @@
 
 Global rules: `docs/PRD.md` (§1–§13 + §21 carve-out registry) · Principles: `docs/PRINCIPLES.md` · Cross-cutting status: `docs/CHECKLIST.md` · Per-tool spec **+ verification**: `docs/tools/<tool>.md` (source in `src/<tool>.c`)
 
-Tools: `pin-to-top` `find-my-mouse` `mouse-spotlight` `color-picker` `capture` `pixel-view` `ip-send` `context-menu` `ocr` `window-switcher` `mwb` `kyper` `whisper-cast`
+Tools: `pin-to-top` `find-my-mouse` `mouse-spotlight` `color-picker` `capture` `pixel-view` `ip-send` `context-menu` `ocr` `window-switcher` `mwb` `kyper` `whisper-cast` `bindy`
 Script tool: `src/cmdx.ps1` → `docs/tools/cmdx.md`
 
 ## Docs
@@ -16,6 +16,8 @@ Script tool: `src/cmdx.ps1` → `docs/tools/cmdx.md`
 | `docs/DEVELOPMENT.md` | Build + dev setup |
 | `docs/HOW_I_USE_IT.md` | Author's daily-driver workflow |
 | `docs/tools/<tool>.md` | Per-tool spec **+ its "Verified" section** — the single owner of per-tool truth |
+| `docs/bindy-language.md` | Bindy `.bindy` language reference (grammar, constructs, key names, limits) |
+| `docs/shortcuts.bindy` | Author's configured Bindy script (port of `shortcuts.ahk`; ready-to-run copies live beside the binaries) |
 | `docs/common/<header>.md` | One per `src/common/<header>.h` (e.g. `tiny_gui.h` → `tiny_gui.md`) |
 | `shortcuts.ahk` | AutoHotkey v2 script (repo root, not a doc) |
 

@@ -143,6 +143,11 @@ $TARGET_CONFIGS = [ordered]@{
         Libs       = @('ws2_32', 'iphlpapi', 'user32', 'gdi32', 'shell32')
         ExtraMinGW = @('-municode')
     }
+    'bindy' = @{
+        Subsystem  = 'console'
+        Libs       = @('user32')
+        ExtraMinGW = @('-municode')
+    }
 }
 
 function Resolve-TargetName([string]$Name) {

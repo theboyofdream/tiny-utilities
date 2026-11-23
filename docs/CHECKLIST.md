@@ -24,19 +24,21 @@ Legend: `[x]` done & verified, `[ ]` known gap, `[-]` not applicable.
 | kyper | **Experimental** | 2026-10-26 | `docs/tools/kyper.md` |
 | whisper-cast | **Experimental** | 2026-10-26 | `docs/tools/whisper-cast.md` |
 | cmdx (script tool) | stable | 2026-09-04 | `docs/tools/cmdx.md` |
+| bindy (keymapper / hotkey language) | **New / Experimental** | 2026-11-23 | `docs/tools/bindy.md` |
 
 \* ip-send: last-known-good restored from `src/ip-send.c.bak` on 2026-10-17 after an uncommitted rewrite broke the composer (discarded rewrite preserved as `src/ip-send.c.rewrite`; details in ip-send.md).
 
 ## 1. HARD RULES (PRD §1)
-- [x] No background services — one-shot process + bounded loop (PRD §21 exceptions: mwb tray, kyper/whisper-cast servers)
+- [x] No background services — one-shot process + bounded loop (PRD §21 exceptions: mwb tray, kyper/whisper-cast servers, bindy resident hotkey loop)
 - [x] No registry — except PRD §21 (`context-menu`, `ip-send` menus; `cmdx` User PATH)
 - [x] No disk persistence — no config files (exceptions: mwb read-only `mwb.txt`; ocr provisioning beside exe), no env vars
-- [x] No global hooks — except PRD §21 (mwb server capture; window-switcher session hook)
+- [x] No global hooks — except PRD §21 (mwb server capture; window-switcher session hook; bindy `WH_KEYBOARD_LL` for exact AHK-style keymaps, unhooked on exit). `RegisterHotKey` is no longer used by bindy
 - [x] One process per invocation
 - [x] Overlays click-through — `WS_EX_LAYERED | WS_EX_TRANSPARENT`
 - [x] No GUI windows except overlays + native dialogs (exceptions: ip-send composer, pixel-view viewer)
 - [x] Clean exit on toggle-off — smoke-tested across tools
 - [x] Clang only — clang-cl (A) and MinGW (B); never gcc
+- [x] New tools registered in PRD §0.1 table + §21 (bindy: resident hotkey engine)
 
 ## 2. COMPILER / BUILD (PRD §2)
 - [x] Both toolchains verified; `build.ps1 [-Mode release|debug] <target|all>` → `dist/release/` / `dist/debug/`

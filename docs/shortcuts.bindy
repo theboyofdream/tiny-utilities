@@ -1,0 +1,153 @@
+// Port of C:\Users\abhishek.c\Documents\AutoHotkey\shortcuts.ahk to Bindy.
+// AHK modifier legend:  ! = alt   ^ = ctrl   + = shift   # = win
+// Reserved combos from the AHK file were remapped to free ones (see comments).
+// Run from the folder containing the .exe files:  bindy.exe shortcuts.bindy
+
+// This script's desktop-icon PowerShell block is longer than the 1024-char default.
+max_script_chars 8192
+
+const shots = %USERPROFILE%\Pictures\Screenshots
+var mode = "snip"
+
+on_start:
+    cmd:
+        if not exist "$shots" mkdir "$shots"
+    :end
+:end
+
+// --- 1-8: text navigation -------------------------------------------------
+alt+j = home                          // !j
+alt+l = end                           // !l
+alt+shift+j = shift+home              // +!j
+alt+shift+l = shift+end               // +!l
+ctrl+alt+shift+j = ctrl+shift+home    // ^+!j
+ctrl+alt+shift+l = ctrl+shift+end     // ^+!l
+ctrl+alt+j = ctrl+home                // ^!j
+ctrl+alt+l = ctrl+end                 // ^!l
+
+// --- 9-10: window keys ----------------------------------------------------
+alt+q = alt+f4                        // !q
+alt+s = f11                           // !s
+
+// --- 11: F12 / Ctrl+F12 toggles desktop icons ------------------------------
+// AHK used ControlGetHwnd + DllCall(IsWindowVisible) + WinHide/WinShow.
+fn toggle_icons():
+ps1:
+    $code = @'
+    using System;
+    using System.Runtime.InteropServices;
+    
+    public class DesktopIconsV2 {
+        [DllImport("user32.dll")]
+        static extern bool EnumWindows(EnumWindowsProc callback, IntPtr param);
+    
+        [DllImport("user32.dll", CharSet = CharSet.Auto)]
+        static extern IntPtr FindWindowEx(
+            IntPtr parent, IntPtr after, string cls, string title
+        );
+    
+        [DllImport("user32.dll")]
+        public static extern bool IsWindowVisible(IntPtr hwnd);
+    
+        [DllImport("user32.dll")]
+        public static extern bool ShowWindow(IntPtr hwnd, int cmd);
+    
+        delegate bool EnumWindowsProc(IntPtr hwnd, IntPtr param);
+    
+        public static IntPtr GetDesktopListView() {
+            IntPtr result = IntPtr.Zero;
+    
+            EnumWindows(delegate(IntPtr hwnd, IntPtr param) {
+                IntPtr view = FindWindowEx(
+                    hwnd, IntPtr.Zero, "SHELLDLL_DefView", null
+                );
+    
+                if (view != IntPtr.Zero) {
+                    result = FindWindowEx(
+                        view, IntPtr.Zero, "SysListView32", "FolderView"
+                    );
+                    if (result != IntPtr.Zero)
+                        return false;
+                }
+    
+                return true;
+            }, IntPtr.Zero);
+    
+            return result;
+        }
+    }
+    '@
+    
+    if (-not ("DesktopIconsV2" -as [type])) {
+        Add-Type $code
+    }
+    
+    $icons = [DesktopIconsV2]::GetDesktopListView()
+    
+    if ($icons -eq [IntPtr]::Zero) {
+        throw "Desktop icon view not found."
+    }
+    
+    $visible = [DesktopIconsV2]::IsWindowVisible($icons)
+    
+    [void][DesktopIconsV2]::ShowWindow(
+        $icons,
+        $(if ($visible) { 0 } else { 5 })
+    )
+:end
+:end
+
+f12 = toggle_icons()
+ctrl+f12 = toggle_icons()
+
+// --- 12: double-tap left Ctrl -> mouse spotlight ---------------------------
+// AHK: ~LCtrl Up with a 300 ms window. Bindy uses a double-tap combo.
+lctrl+lctrl (300ms) = cmd .\mouse-spotlight.exe -s 90 -d 81
+
+// --- 13: pin to top ------------------------------------------------------
+win+ctrl+t = cmd .\pin-to-top.exe --border-width 2
+
+// --- 14-16: capture -------------------------------------------------------
+printscreen = cmd .\capture.exe --fullscreen --draw-toolbar --save "$shots"
+alt+printscreen = cmd .\capture.exe --window --draw-toolbar --save "$shots"
+ctrl+printscreen = cmd .\capture.exe --snip --draw-toolbar --save "$shots"
+
+// --- 17: color picker -----------------------------------------------------
+// AHK used #^c (win+ctrl+c). Windows reserves it for color filters, so use ctrl+alt+c.
+ctrl+alt+c = cmd .\color-picker.exe
+
+// --- 18: ip-send ----------------------------------------------------------
+alt+i = cmd .\ip-send.exe
+
+// --- 19: snip -> OCR -> clipboard -----------------------------------------
+// AHK used #^O (win+ctrl+O). Windows reserves it for Narrator, so use ctrl+alt+o.
+ctrl+alt+o:
+ps1:
+    $dir = "$shots"
+    $before = @{}
+    Get-ChildItem -Path $dir -File -ErrorAction SilentlyContinue | ForEach-Object { $before[$_.FullName] = $true }
+
+    .\capture.exe --snip --save "$dir"
+
+    $img = $null
+    for ($i = 0; $i -lt 100; $i++) {
+        Start-Sleep -Milliseconds 100
+        $found = Get-ChildItem -Path $dir -File -ErrorAction SilentlyContinue | Where-Object { -not $before.ContainsKey($_.FullName) } | Select-Object -First 1
+        if ($found) { $img = $found.FullName; break }
+    }
+
+    if ($img) {
+        $txt = (.\ocr.exe --image "$img" | Out-String).Trim()
+        if ($txt) { Set-Clipboard -Value $txt }
+    }
+:end
+:end
+
+// --- 20: window switcher --------------------------------------------------
+// AHK used !Tab. Windows reserves alt+tab for the task switcher, so use alt+z.
+alt+z = cmd .\window-switcher.exe -bg blur --blur 30 -l center -s recent -a -sw 0
+
+// --- 21: tap right Ctrl -> context menu key -------------------------------
+// AHK used a short single press of RControl (<0.2 s). Bindy's (Nms) combo is a
+// double-tap, so this fires on two taps of right Ctrl inside 200 ms.
+rctrl = apps

@@ -40,6 +40,7 @@ Ownership is layered by fact type — each fact lives in exactly one place:
 | kyper | `docs/tools/kyper.md` |
 | whisper-cast | `docs/tools/whisper-cast.md` |
 | cmdx (script tool) | `docs/tools/cmdx.md` |
+| bindy (keymapper / hotkey language) | `docs/tools/bindy.md` · language: `docs/bindy-language.md` |
 
 ---
 
@@ -250,6 +251,7 @@ Every deviation from the hard rules is registered here — granted explicitly, s
 | `mwb` | Full §21.1 grant below | Low-level hooks (server mode), tray + native dialogs, log file + received-files folder, long-running tray process, optional read-only config |
 | `kyper` | Resident + network + child processes | Long-running console server until toggle-off; TCP listener on `0.0.0.0:<port>` (HTTP Basic auth); spawns and steers child agent processes |
 | `whisper-cast` | Resident + network + input injection | Long-running console server; TCP listener; `SendInput` keystroke injection into the currently focused window (no focus stealing) |
+| `bindy` | Resident + low-level keyboard hook + input injection | Long-running console loop until IPC toggle-off / Ctrl+C; `WH_KEYBOARD_LL` hook matches combos with left/right precision and suppresses keys the OS would otherwise handle (`alt+tab`, `win+ctrl+c/o`, `F12`); `SendInput` emits key sequences. Hook is unhooked on every exit path. No GUI windows, no registry, no disk writes, no config files; the `.bindy` script is user-supplied input passed by path |
 
 ### 21.1 mwb (full grant)
 

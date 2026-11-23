@@ -38,6 +38,7 @@ Every utility runs as an independent, single-instance executable with instant ho
 | **Context Menu Manager** *(Preview)* | `context-menu.exe` | GUI / CLI | Cascading Explorer context menu registry utility with recursive submenus and XML backup/update. *(Experimental)* | [Details](docs/tools/context-menu.md) |
 | **OCR Utility** | `ocr.exe` | GUI / CLI | Portable zero-install OCR tool leveraging Tesseract engine with automatic language downloading and clipboard copy. | [Details](docs/tools/ocr.md) |
 | **Command Manager** | `cmdx.ps1` | CLI | PowerShell command dispatcher creating `.cmd`/`.ps1` dual-shims in a dedicated folder registered in User PATH. | [Details](docs/tools/cmdx.md) |
+| **Bindy** *(New / Experimental)* | `bindy.exe` | CLI | Keymapper & hotkey scripting language: readable `.bindy` scripts for remaps, functions, conditions and `cmd`/`ps1` actions. Resident until toggled off (PRD §21). | [Details](docs/tools/bindy.md) · [Language](docs/bindy-language.md) |
 
 > [!TIP]
 > *`ip-send` is an independent open-source frontend and is not affiliated with or endorsed by IP Messenger (`ipmsg.org`).*
@@ -46,7 +47,7 @@ Every utility runs as an independent, single-instance executable with instant ho
 
 ## 🚀 Key Advantages & Architecture
 
-- **Zero Background Overhead**: No resident processes, background tray services, or memory bloat. Tools launch instantly via hotkeys and exit immediately upon completion.
+- **Zero Background Overhead**: No services, tray servers, or memory bloat. Tools launch instantly via hotkeys and exit immediately upon completion. (Exception: `bindy` is intentionally resident to listen for hotkeys — PRD §21 — and exits on toggle-off.)
 - **Single-Instance IPC Toggle**: Interactive overlays use named Win32 Mutex & Event primitives (`Global\Tiny<Tool>Mutex` / `Event`). Re-launching a running tool instantly toggles it off and exits cleanly.
 - **Per-Monitor DPI v2 Aware**: Automatically scales overlays, fonts, spotlights, and hitboxes dynamically across multi-monitor setups with mixed DPI scaling factors (100%, 150%, 200%).
 - **Pure Win32 & GDI/DWM**: Hardware-accelerated Desktop Window Manager compositing without DirectX, Electron, or heavy web engines. Memory footprint is < 10 MB per tool with < 0.2% CPU.

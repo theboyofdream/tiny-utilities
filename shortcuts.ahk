@@ -1,5 +1,10 @@
 #Requires AutoHotkey v2.0
 
+; Bindy alternative (New / Experimental): the hotkeys below can also be expressed in a
+; .bindy script. See docs/bindy-language.md, docs/tools/bindy.md and
+; docs/shortcuts.bindy (the configured Bindy script). The AHK wiring is kept as-is;
+; both are not run together.
+
 ; Alt + J → Home
 !j::Send "{Home}"
 
