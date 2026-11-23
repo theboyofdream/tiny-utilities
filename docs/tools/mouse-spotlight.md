@@ -9,7 +9,7 @@ Native Win32 presentation overlay tool that dims the screen except for a customi
   - `Ctrl +` / `Ctrl =` / `Numpad +`: Smoothly resizes the spotlight larger (+3px base radius per frame, max `1000`).
   - `Ctrl -` / `Numpad -`: Smoothly resizes the spotlight smaller (-3px base radius per frame, min `20`).
   - `Ctrl 0` / `Numpad 0`: Resets spotlight size back to the initial startup size (`g_initialBaseSize`).
-  - `Esc`, any key press, or mouse click: Exits the utility cleanly (following `find-my-mouse` UX conventions, with a 250ms activation grace period).
+  - `Esc`, any key press (including `Ctrl`/`Shift`/`Alt`/`Win`), or mouse click: Exits the utility cleanly (following `find-my-mouse` UX conventions, with a 250ms activation grace period). Only a live `Ctrl`+resize combo (`+`/`-`/`0`) is exempt so the resize hotkeys keep working.
 - **Single-Instance IPC Toggle**:
   - **First launch**: Creates named mutex `Global\TinyMouseSpotlightMutex` and auto-reset event `Global\TinyMouseSpotlightEvent`, creates overlay window, enters 60 FPS loop.
   - **Second launch**: Detects existing mutex, signals event, and exits `0`. Running instance receives toggle signal and exits cleanly.
@@ -33,7 +33,7 @@ Native Win32 presentation overlay tool that dims the screen except for a customi
 
 - [x] 60 FPS tracking (16 ms); spotlight follows the cursor
 - [x] `--size`/`-s` 20..1000 (default 150); `--dim`/`-d` 0–100 % or 0–255 alpha (default 65 %)
-- [x] `Ctrl +/-/0` enlarge/shrink/reset; key or click exits after 250 ms grace (find-my-mouse convention)
+- [x] `Ctrl +/-/0` enlarge/shrink/reset; any key (incl. modifiers) or click exits after 250 ms grace (find-my-mouse convention); live `Ctrl`+resize combo exempt
 - [x] DPI-aware radius via `TinyDPI_GetDpiForPoint`
 - [x] `UpdateLayeredWindow` per-pixel alpha over virtual desktop; partial clears; 6 px AA edge; no `SetWindowRgn`
 - [x] Click-through; IPC `Global\TinyMouseSpotlightMutex/Event`

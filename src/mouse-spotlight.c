@@ -9,7 +9,7 @@
  *   - --dim / -d controls background dim percentage (0..100%) or raw alpha (0..255).
  *   - Ctrl + / - resizes spotlight dynamically.
  *   - Ctrl + 0 resets spotlight size to initial value.
- *   - Esc, any key press, or mouse click exits utility cleanly (after activation grace).
+ *   - Esc, any key press (including Ctrl/Shift/Alt/Win), or mouse click exits utility cleanly (after activation grace; only a live Ctrl+resize combo is exempt).
  *   - Instant on/off, click-through overlay (WS_EX_TRANSPARENT).
  *   - Single-instance toggle pattern via IPC mutex & event.
  */
@@ -53,23 +53,20 @@ static LRESULT CALLBACK DimWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     return DefWindowProcW(hwnd, msg, wp, lp);
 }
 
-static bool IsModifierKey(int vk)
+static bool IsCtrlKey(int vk)
+{
+    return vk == VK_CONTROL || vk == VK_LCONTROL || vk == VK_RCONTROL;
+}
+
+static bool IsResizeKey(int vk)
 {
     switch (vk) {
-        case VK_SHIFT:
-        case VK_LSHIFT:
-        case VK_RSHIFT:
-        case VK_CONTROL:
-        case VK_LCONTROL:
-        case VK_RCONTROL:
-        case VK_MENU:
-        case VK_LMENU:
-        case VK_RMENU:
-        case VK_LWIN:
-        case VK_RWIN:
-        case VK_CAPITAL:
-        case VK_NUMLOCK:
-        case VK_SCROLL:
+        case VK_OEM_PLUS:
+        case VK_ADD:
+        case VK_OEM_MINUS:
+        case VK_SUBTRACT:
+        case '0':
+        case VK_NUMPAD0:
             return true;
         default:
             return false;
@@ -330,17 +327,29 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR lpCmdLi
             if ((GetAsyncKeyState('0') & 0x8000) || (GetAsyncKeyState(VK_NUMPAD0) & 0x8000)) {
                 g_baseSize = g_initialBaseSize;
             }
-        } else {
-            /* Dismissal check: after activation grace period, any key press or mouse click exits */
-            if (GetTickCount() - startMs > ACTIVATE_GRACE_MS) {
-                for (int vk = 1; vk < 255; vk++) {
-                    if (!IsModifierKey(vk) && (GetAsyncKeyState(vk) & 0x8000)) {
-                        running = false;
-                        break;
-                    }
+        }
+
+        /* Dismissal check: after activation grace period, any key press
+         * (including Ctrl/Shift/Alt/Win) or mouse click exits — matching
+         * find-my-mouse. Only a live Ctrl+resize combo is exempt so the
+         * resize hotkeys keep working. */
+        if (GetTickCount() - startMs > ACTIVATE_GRACE_MS) {
+            bool resizeKeyHeld = false;
+            for (int vk = 1; vk < 255 && !resizeKeyHeld; vk++) {
+                if (IsResizeKey(vk) && (GetAsyncKeyState(vk) & 0x8000)) {
+                    resizeKeyHeld = true;
                 }
-                if (!running) break;
             }
+            bool resizeCombo = ctrlDown && resizeKeyHeld;
+
+            for (int vk = 1; vk < 255; vk++) {
+                if (resizeCombo && (IsCtrlKey(vk) || IsResizeKey(vk))) continue;
+                if ((GetAsyncKeyState(vk) & 0x8000) != 0) {
+                    running = false;
+                    break;
+                }
+            }
+            if (!running) break;
         }
 
         /* Get cursor position & compute DPI scaled spotlight radius */
